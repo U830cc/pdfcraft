@@ -500,20 +500,24 @@ pub fn field_appearance_drawn(doc: &Document, f: &Field, w: &Widget, values: &[S
         _ => {
             let comb = f.has(flags::COMB) && !f.has(flags::MULTILINE) && !f.has(flags::PASSWORD) && f.max_len.is_some_and(|m| m > 0);
             if f.kind == FieldKind::Text && f.has(flags::MULTILINE) {
+                // Line pitch and the first baseline's drop, in em. Thai stacks a vowel and a tone
+                // mark above its letters and hangs vowels below them, so its lines need more room
+                // than Latin text or the marks of one line touch the letters of the next.
+                let (pitch, rise) = if draws_thai(&text) { (1.45, 1.05) } else { (1.15, 0.85) };
                 if size == 0.0 {
                     // Auto size: the largest size (≤ 12) whose wrapped lines fit the height.
                     size = 12.0;
-                    while size > 4.0 && wrap(&text, size).len() as f64 * size * 1.15 > height - 2.0 * pad {
+                    while size > 4.0 && wrap(&text, size).len() as f64 * size * pitch > height - 2.0 * pad {
                         size -= 0.5;
                     }
                 }
-                let mut y = height - pad - size * 0.85;
+                let mut y = height - pad - size * rise;
                 for line in wrap(&text, size) {
                     if y < -size {
                         break;
                     }
                     show(&mut body, x_for(&line, size), y, &line, size);
-                    y -= size * 1.15;
+                    y -= size * pitch;
                 }
             } else {
                 if size == 0.0 {

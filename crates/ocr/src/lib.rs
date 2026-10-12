@@ -26,8 +26,9 @@ pub const RECOGNITION_MODEL: &str = "text-recognition.rten";
 /// `€`, which made a scanned "€250" read as "E250".
 pub const ALPHABET: &str = " 0123456789!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~€ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
-/// The languages the models read (ISO 639-1); all use the Latin alphabet without accents.
-pub const LANGUAGES: &[(&str, &str)] = &[("en", "English")];
+/// The document languages to choose from (ISO 639-1). English is read by the Latin models (the
+/// Latin alphabet without accents) and Thai by the Thai ones; see [`Ocr::recognize_in`].
+pub const LANGUAGES: &[(&str, &str)] = &[("en", "English"), ("th", "Thai")];
 
 /// Whether any recogniser's models are installed: the Latin ones, the Thai ones or both.
 pub fn installed() -> bool {
@@ -40,6 +41,8 @@ pub enum OcrError {
     /// `cargo xtask models`). The UI catalogs key this exact text.
     #[error("the text recognition models are not installed (reinstall PdfCraft, or set PDFCRAFT_MODELS to the folder that holds them)")]
     NoModels,
+    #[error("the Thai text recognition models are not installed (reinstall PdfCraft, or set PDFCRAFT_MODELS to the folder that holds them)")]
+    NoThaiModels,
     #[error("loading {0}: {1}")]
     Load(String, String),
     #[error("text recognition failed: {0}")]
@@ -97,6 +100,10 @@ impl Models {
 pub struct Word {
     pub text: String,
     pub rect: [f32; 4],
+    /// Where parts of `text` start inside the box: (byte offset in `text`, x in image pixels),
+    /// ascending. A whole Thai line is one word (its characters must stay in reading order),
+    /// and its stops are where each of its words starts. Empty when the text is one word.
+    pub stops: Vec<(usize, f32)>,
 }
 
 /// A recognised line of words, in reading order.
@@ -158,8 +165,21 @@ impl Ocr {
         self.thai.is_some()
     }
 
-    /// Recognise the text in an RGBA (or RGB, or grey) image, `width` × `height` pixels.
+    /// Recognise the text in an RGBA (or RGB, or grey) image, `width` × `height` pixels, reading
+    /// Thai where the Thai models find it and Latin text with the Latin models otherwise.
     pub fn recognize(&self, pixels: &[u8], width: u32, height: u32) -> Result<Vec<Line>, OcrError> {
+        self.recognize_in("", pixels, width, height)
+    }
+
+    /// [`Ocr::recognize`] for a document in `language` (a code of [`LANGUAGES`]). `"th"` reads
+    /// every page with the Thai models, also one they find no Thai on, and fails when they are
+    /// not installed. Any other language chooses per page as [`Ocr::recognize`] does, so a Thai
+    /// document left at the default language is still read as Thai.
+    pub fn recognize_in(&self, language: &str, pixels: &[u8], width: u32, height: u32) -> Result<Vec<Line>, OcrError> {
+        let thai_only = language == "th";
+        if thai_only && self.thai.is_none() {
+            return Err(OcrError::NoThaiModels);
+        }
         if width == 0 || height == 0 || pixels.is_empty() {
             return Err(OcrError::EmptyImage);
         }
@@ -176,7 +196,7 @@ impl Ocr {
                 if rgb.len() == count { rgb.iter().flat_map(|g| [*g, *g, *g]).collect::<Vec<u8>>().into() } else { rgb.clone() };
             let lines = thai.recognize(&colour, width, height)?;
             let has_thai = lines.iter().flat_map(|l| &l.words).any(|w| w.text.chars().any(pdfcraft_fonts::thai_break::is_thai));
-            if has_thai || self.engine.is_none() {
+            if has_thai || thai_only || self.engine.is_none() {
                 return Ok(lines);
             }
         }
@@ -196,7 +216,7 @@ impl Ocr {
                     .words()
                     .map(|w| {
                         let r = w.bounding_rect();
-                        Word { text: w.to_string(), rect: [r.left() as f32, r.top() as f32, r.right() as f32, r.bottom() as f32] }
+                        Word { text: w.to_string(), rect: [r.left() as f32, r.top() as f32, r.right() as f32, r.bottom() as f32], stops: Vec::new() }
                     })
                     .filter(|w| !w.text.trim().is_empty())
                     .collect(),
@@ -214,6 +234,9 @@ pub struct PlacedWord {
     pub origin: [f64; 2],
     pub across: [f64; 2],
     pub up: [f64; 2],
+    /// Where parts of `text` start: (byte offset in `text`, fraction of the way along `across`),
+    /// ascending. See [`Word::stops`].
+    pub stops: Vec<(usize, f64)>,
 }
 
 impl PlacedWord {
@@ -224,7 +247,10 @@ impl PlacedWord {
         let o = to_user(l, b);
         let br = to_user(r, b);
         let tl = to_user(l, t);
-        PlacedWord { text: word.text.clone(), origin: o, across: [br[0] - o[0], br[1] - o[1]], up: [tl[0] - o[0], tl[1] - o[1]] }
+        let span = f64::from(r - l);
+        let stops =
+            if span > 0.0 { word.stops.iter().map(|(at, x)| (*at, (f64::from(*x - l) / span).clamp(0.0, 1.0))).collect() } else { Vec::new() };
+        PlacedWord { text: word.text.clone(), origin: o, across: [br[0] - o[0], br[1] - o[1]], up: [tl[0] - o[0], tl[1] - o[1]], stops }
     }
 }
 
@@ -263,34 +289,45 @@ pub fn text_layer_with(words: &[PlacedWord], unicode: Option<&UnicodeFont>) -> V
     // The font selected so far: `false` is Helvetica.
     let mut in_unicode = false;
     for w in words {
-        // Runs in one font each: (in the Unicode font, bytes, width in em).
-        let mut runs: Vec<(bool, Vec<u8>, f64)> = Vec::new();
+        // Runs in one font each, cut again at every stop: (in the Unicode font, bytes, width in
+        // em, the stop it starts at if any).
+        let mut runs: Vec<(bool, Vec<u8>, f64, Option<f64>)> = Vec::new();
         let mut plain = String::new();
-        let flush = |plain: &mut String, runs: &mut Vec<(bool, Vec<u8>, f64)>| {
+        let mut plain_stop: Option<f64> = None;
+        let flush = |plain: &mut String, stop: &mut Option<f64>, runs: &mut Vec<(bool, Vec<u8>, f64, Option<f64>)>| {
             if !plain.is_empty() {
-                runs.push((false, pdfcraft_fonts::win_ansi(plain), helvetica_width(plain, 1.0)));
+                runs.push((false, pdfcraft_fonts::win_ansi(plain), helvetica_width(plain, 1.0), stop.take()));
                 plain.clear();
             }
         };
-        for c in w.text.chars() {
+        for (at, c) in w.text.char_indices() {
+            let stop = w.stops.iter().find(|(byte, _)| *byte == at && at > 0).map(|(_, f)| *f);
+            if stop.is_some() {
+                flush(&mut plain, &mut plain_stop, &mut runs);
+            }
             let mut buf = [0u8; 4];
             let s = c.encode_utf8(&mut buf);
             let other = if pdfcraft_fonts::first_non_win_ansi(s).is_some() { unicode.and_then(|f| (f.encode)(s)) } else { None };
             match other {
                 Some((bytes, width)) => {
-                    flush(&mut plain, &mut runs);
-                    match runs.last_mut() {
-                        Some((true, last, total)) => {
+                    flush(&mut plain, &mut plain_stop, &mut runs);
+                    match runs.last_mut().filter(|_| stop.is_none()) {
+                        Some((true, last, total, _)) => {
                             last.extend(bytes);
                             *total += width;
                         }
-                        _ => runs.push((true, bytes, width)),
+                        _ => runs.push((true, bytes, width, stop)),
                     }
                 }
-                None => plain.push(c),
+                None => {
+                    if plain.is_empty() {
+                        plain_stop = stop;
+                    }
+                    plain.push(c);
+                }
             }
         }
-        flush(&mut plain, &mut runs);
+        flush(&mut plain, &mut plain_stop, &mut runs);
         let width: f64 = runs.iter().map(|r| r.2).sum();
         let height = w.up[0].hypot(w.up[1]);
         if !(width > 0.0 && height > 0.0) {
@@ -304,15 +341,34 @@ pub fn text_layer_with(words: &[PlacedWord], unicode: Option<&UnicodeFont>) -> V
         let nums: Vec<String> = m.iter().map(|v| num(*v)).collect();
         out.extend_from_slice(nums.join(" ").as_bytes());
         out.extend_from_slice(b" Tm");
-        for (other, bytes, _) in runs {
+        // The pen, in em from the start of the text.
+        let mut pen = 0.0;
+        for (other, bytes, run_width, stop) in runs {
             if other != in_unicode {
                 let name = unicode.filter(|_| other).map_or("PCHelv", |f| f.name);
                 out.extend(format!(" /{name} 1 Tf").bytes());
                 in_unicode = other;
             }
             out.push(b' ');
-            out.extend(pdfcraft_fonts::literal(&bytes));
-            out.extend_from_slice(b" Tj");
+            // A stop moves the pen to where its word starts on the page (a TJ number moves it
+            // back by thousandths of an em), so each word is found where it is. The text stays
+            // one run, in reading order.
+            // Forwards only: moved back, a word would start under the end of the one before it,
+            // and a reader that orders text by position would shuffle their letters.
+            let shift = stop.map(|f| (pen - f * width) * 1000.0).filter(|s| s.is_finite() && *s <= -0.5);
+            match shift {
+                Some(shift) => {
+                    out.extend(format!("[{} ", num(shift)).bytes());
+                    out.extend(pdfcraft_fonts::literal(&bytes));
+                    out.extend_from_slice(b"] TJ");
+                    pen -= shift / 1000.0;
+                }
+                None => {
+                    out.extend(pdfcraft_fonts::literal(&bytes));
+                    out.extend_from_slice(b" Tj");
+                }
+            }
+            pen += run_width;
         }
         out.push(b'\n');
     }
@@ -328,7 +384,7 @@ mod tests {
     fn places_words_through_the_mapping() {
         // 2 pixels per point, page 612 × 792, y flipped.
         let to_user = |x: f32, y: f32| [x as f64 / 2.0, 792.0 - y as f64 / 2.0];
-        let w = PlacedWord::place(&Word { text: "Hello".into(), rect: [100.0, 200.0, 300.0, 240.0] }, to_user);
+        let w = PlacedWord::place(&Word { text: "Hello".into(), rect: [100.0, 200.0, 300.0, 240.0], stops: Vec::new() }, to_user);
         assert_eq!(w.origin, [50.0, 672.0]);
         assert_eq!(w.across, [100.0, 0.0]);
         assert_eq!(w.up, [0.0, 20.0]);
@@ -344,7 +400,7 @@ mod tests {
 
     #[test]
     fn text_layer_is_invisible_text_fitted_to_each_box() {
-        let w = PlacedWord { text: "Hi".into(), origin: [10.0, 20.0], across: [30.0, 0.0], up: [0.0, 9.3] };
+        let w = PlacedWord { text: "Hi".into(), origin: [10.0, 20.0], across: [30.0, 0.0], up: [0.0, 9.3], stops: Vec::new() };
         let s = String::from_utf8(text_layer(&[w])).unwrap();
         assert!(s.contains("3 Tr") && s.contains("/PCHelv 1 Tf"), "{s}");
         let width = helvetica_width("Hi", 1.0);
@@ -354,7 +410,7 @@ mod tests {
 
     #[test]
     fn thai_goes_to_the_unicode_font_and_latin_stays_in_helvetica() {
-        let w = PlacedWord { text: "ราคา 90 บาท".into(), origin: [10.0, 20.0], across: [60.0, 0.0], up: [0.0, 9.3] };
+        let w = PlacedWord { text: "ราคา 90 บาท".into(), origin: [10.0, 20.0], across: [60.0, 0.0], up: [0.0, 9.3], stops: Vec::new() };
         // Two bytes and half an em per character; nothing for a character it lacks.
         let encode = |s: &str| {
             s.chars()
@@ -374,10 +430,29 @@ mod tests {
     }
 
     #[test]
+    fn stops_put_each_word_where_it_is_and_keep_one_run() {
+        // Two words of equal nominal width; the second really starts 70% of the way along.
+        let word = Word { text: "ab cd".into(), rect: [0.0, 0.0, 100.0, 10.0], stops: vec![(0, 0.0), (3, 70.0)] };
+        let placed = PlacedWord::place(&word, |x, y| [f64::from(x), 10.0 - f64::from(y)]);
+        assert_eq!(placed.stops, [(0, 0.0), (3, 0.7)]);
+        let s = String::from_utf8(text_layer(std::slice::from_ref(&placed))).unwrap();
+        // One text matrix, the first word shown as it is, the second after a pen move.
+        assert_eq!(s.matches(" Tm").count(), 1, "{s}");
+        let (total, first) = (helvetica_width("ab cd", 1.0), helvetica_width("ab ", 1.0));
+        assert!(s.contains(&format!("(ab ) Tj [{} (cd)] TJ", num((first - 0.7 * total) * 1000.0))), "{s}");
+        // A stop behind the pen is ignored: the pen never moves back.
+        let early = PlacedWord { stops: vec![(0, 0.0), (3, 0.2)], ..placed.clone() };
+        assert!(String::from_utf8(text_layer(&[early])).unwrap().contains("(ab ) Tj (cd) Tj"));
+        // Without stops the layer is what it always was.
+        let plain = PlacedWord { stops: Vec::new(), ..placed };
+        assert!(String::from_utf8(text_layer(&[plain])).unwrap().contains("(ab cd) Tj"));
+    }
+
+    #[test]
     fn rotated_pages_keep_the_reading_direction() {
         // A page turned 90°: image x runs up the page.
         let to_user = |x: f32, y: f32| [y as f64, x as f64];
-        let w = PlacedWord::place(&Word { text: "Up".into(), rect: [0.0, 0.0, 50.0, 10.0] }, to_user);
+        let w = PlacedWord::place(&Word { text: "Up".into(), rect: [0.0, 0.0, 50.0, 10.0], stops: Vec::new() }, to_user);
         assert_eq!(w.across, [0.0, 50.0]);
         assert_eq!(w.up, [-10.0, 0.0]);
     }

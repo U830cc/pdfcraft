@@ -1726,8 +1726,12 @@ pub(crate) fn rewrite_block_with_limit(
             "formatting part of right-to-left (Hebrew) text, or choosing a document font for it, isn't supported yet".into(),
         ));
     }
+    // Thai is shaped and set in the Thai face by the styled region path, whatever family or
+    // weight was asked for: the single-style path below can only write it one glyph a letter.
+    let thai = text.unwrap_or(&b.text).chars().any(pdfcraft_fonts::thai_break::is_thai);
     if !hebrew
         && (!style.ranges.is_empty()
+            || thai
             || style.resource.is_some()
             || (text.is_some_and(|draft| {
                 draft.contains('\n')

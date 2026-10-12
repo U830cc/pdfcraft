@@ -774,8 +774,15 @@ pub(super) fn rewrite_styled_block(
             tm[4] += ax;
             tm[5] += ay;
             let mut segment_width = segment_advances.get(&(row_index, pos)).copied().unwrap_or(0.0);
-            if let Some((_, shaped, _)) = shaped_runs.get(&(row_index, pos)) {
+            if let Some((_, shaped, family)) = shaped_runs.get(&(row_index, pos)) {
                 let resource = glyph_resources.get(&(row_index, pos)).ok_or_else(|| EditError::Invalid("shaped font is missing".into()))?;
+                // The Thai document face is embedded in its regular weight only. Bold text set in
+                // it is thickened by stroking each glyph's outline in the text's own colour, the
+                // way PDF writers embolden a face that has no bold.
+                let embolden = source.bold
+                    && pdfcraft_fonts::document_thai_font()
+                        .is_some_and(|f| pdfcraft_fonts::embedding::face_key(family) == pdfcraft_fonts::embedding::face_key(f.family));
+                let [sr, sg, sb] = overrides.get(&item.1).and_then(|r| r.color).or(style.color).unwrap_or(source.color);
                 let mut properties = Dict::new();
                 properties.set(b"ActualText".to_vec(), Object::String(PdfString::text(&string)));
                 block_ops.push(Op::new("BDC", vec![Object::name("Span"), Object::Dict(properties)]));
@@ -793,8 +800,19 @@ pub(super) fn rewrite_styled_block(
                     let code = u16::try_from(i + 1).map_err(|_| EditError::Invalid("shaped glyph limit".into()))?;
                     block_ops.push(Op::new("BT", vec![]));
                     block_ops.extend(state.ops());
+                    if embolden {
+                        // About a thirtieth of the glyph's height, as wide as a bold stem adds.
+                        let weight = size * tm[2].hypot(tm[3]) * 0.032;
+                        block_ops.push(Op::new("RG", vec![n(sr), n(sg), n(sb)]));
+                        block_ops.push(Op::new("w", vec![n(weight)]));
+                        block_ops.push(Op::new("Tr", vec![Object::Int(2)]));
+                    }
                     block_ops.push(Op::new("Tm", matrix.map(n).to_vec()));
                     block_ops.push(Op::new("Tj", vec![Object::String(PdfString::literal(code.to_be_bytes().to_vec()))]));
+                    if embolden {
+                        // The rendering mode outlives the text object: fill only again.
+                        block_ops.push(Op::new("Tr", vec![Object::Int(0)]));
+                    }
                     block_ops.push(Op::new("ET", vec![]));
                     extra += state.char_spacing * glyph.text.chars().count() as f64 + state.word_spacing * glyph.text.matches(' ').count() as f64;
                 }

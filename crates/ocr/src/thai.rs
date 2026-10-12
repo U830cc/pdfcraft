@@ -123,8 +123,10 @@ impl ThaiOcr {
         Ok(ThaiOcr { detection: load(&models.detection)?, recognition: load(&models.recognition)?, alphabet })
     }
 
-    /// The text lines of an RGB image, top to bottom. Each line is one [`Word`] holding the
-    /// whole line (Thai has no spaces between words to split it at).
+    /// The text lines of an RGB image, top to bottom. Each line is one [`Word`] holding the whole
+    /// line, so its characters stay in reading order; its [`Word::stops`] say where each of its
+    /// words starts (Thai words are found by the language model in `pdfcraft_fonts::thai_break`,
+    /// as there are no spaces between them).
     pub fn recognize(&self, rgb: &[u8], width: u32, height: u32) -> Result<Vec<Line>, OcrError> {
         let image = Rgb { data: rgb, width: width as usize, height: height as usize };
         if image.width == 0 || image.height == 0 || rgb.len() < image.width.saturating_mul(image.height).saturating_mul(3) {
@@ -132,9 +134,8 @@ impl ThaiOcr {
         }
         let mut lines = Vec::new();
         for rect in self.detect(&image)? {
-            let text = self.read(&image, rect)?;
-            if !text.trim().is_empty() {
-                lines.push(Line { words: vec![Word { text: text.trim().to_string(), rect }] });
+            if let Some(line) = self.read(&image, rect)? {
+                lines.push(Line { words: vec![line] });
             }
         }
         Ok(lines)
@@ -214,12 +215,12 @@ impl ThaiOcr {
         Ok(boxes)
     }
 
-    /// The text of the line in `rect`.
-    fn read(&self, image: &Rgb, rect: [f32; 4]) -> Result<String, OcrError> {
+    /// The line in `rect`, with where its words start. `None` if nothing was read.
+    fn read(&self, image: &Rgb, rect: [f32; 4]) -> Result<Option<Word>, OcrError> {
         let err = |e: &dyn std::fmt::Display| OcrError::Recognize(e.to_string());
         let (w, h) = (rect[2] - rect[0], rect[3] - rect[1]);
         if !(w >= 2.0 && h >= 2.0) {
-            return Ok(String::new());
+            return Ok(None);
         }
         let width = ((LINE_HEIGHT as f32 * w / h).ceil() as usize).clamp(16, MAX_LINE_WIDTH);
         let data = image.planes(rect, width, LINE_HEIGHT, |_, v| (v / 255.0 - 0.5) / 0.5);
@@ -227,8 +228,46 @@ impl ThaiOcr {
         let out: NdTensor<f32, 3> = self.recognition.run_one(input.view().into(), None).map_err(|e| err(&e))?.try_into().map_err(|e| err(&e))?;
         let [_, steps, classes] = out.shape();
         let scores = out.to_vec();
-        Ok(decode(&scores, steps, classes, &self.alphabet))
+        Ok(line(&decode(&scores, steps, classes, &self.alphabet), steps, rect))
     }
+}
+
+/// A recognised line with where each of its words starts. `read` holds the line's characters
+/// with the step (of `steps` across `rect`) each was read at.
+///
+/// A character is read near its middle, so a word starts half an average character before the
+/// step of its first one. The first word starts at the line's left end.
+fn line(read: &[(String, usize)], steps: usize, rect: [f32; 4]) -> Option<Word> {
+    let full: String = read.iter().map(|(s, _)| s.as_str()).collect();
+    let text = full.trim();
+    let visible = read.iter().filter(|(s, _)| !s.trim().is_empty()).count();
+    if visible == 0 || steps == 0 {
+        return None;
+    }
+    let lead = full.len() - full.trim_start().len();
+    let width = rect[2] - rect[0];
+    let half = width / visible as f32 / 2.0;
+    // Where the character starting at byte `at` of `full` begins on the page.
+    let mut starts: Vec<(usize, f32)> = Vec::with_capacity(read.len());
+    let mut at = 0usize;
+    for (s, step) in read {
+        starts.push((at, rect[0] + (*step as f32 + 0.5) / steps as f32 * width - half));
+        at += s.len();
+    }
+    let mut stops: Vec<(usize, f32)> = Vec::new();
+    let mut at = 0usize;
+    for piece in pdfcraft_fonts::thai_break::wrap_pieces(text) {
+        let start = at;
+        at += piece.len();
+        if piece.trim().is_empty() {
+            continue;
+        }
+        let x = starts.iter().find(|(byte, _)| *byte >= start + lead).map_or(rect[2], |(_, x)| *x);
+        // Ascending, inside the line, and the first word at its left end.
+        let x = if stops.is_empty() { rect[0] } else { x.clamp(stops.last().map_or(rect[0], |s| s.1), rect[2]) };
+        stops.push((start, x));
+    }
+    Some(Word { text: text.to_string(), rect, stops })
 }
 
 /// The `character_dict` list of a PaddleOCR `inference.yml`: the entries of the YAML sequence
@@ -273,20 +312,20 @@ fn character_dict(yml: &str) -> Vec<String> {
     out
 }
 
-/// The text of a recogniser output: at each of `steps` the best of `classes` (class 0 is
-/// "nothing"; a class repeated over neighbouring steps is one character). The class after the
-/// alphabet's last is a space.
-fn decode(scores: &[f32], steps: usize, classes: usize, alphabet: &[String]) -> String {
-    let mut text = String::new();
+/// The characters of a recogniser output with the step each was read at: at each of `steps` the
+/// best of `classes` (class 0 is "nothing"; a class repeated over neighbouring steps is one
+/// character). The class after the alphabet's last is a space.
+fn decode(scores: &[f32], steps: usize, classes: usize, alphabet: &[String]) -> Vec<(String, usize)> {
+    let mut read = Vec::new();
     let mut last = 0usize;
-    for step in scores.chunks(classes.max(1)).take(steps) {
+    for (at, step) in scores.chunks(classes.max(1)).take(steps).enumerate() {
         let best = step.iter().enumerate().fold((0usize, f32::MIN), |b, (i, p)| if *p > b.1 { (i, *p) } else { b }).0;
         if best != 0 && best != last {
-            text.push_str(alphabet.get(best - 1).map_or(" ", String::as_str));
+            read.push((alphabet.get(best - 1).map_or(" ", String::as_str).to_string(), at));
         }
         last = best;
     }
-    text
+    read
 }
 
 #[cfg(test)]
@@ -300,9 +339,31 @@ mod tests {
         let classes = 5;
         let step = |best: usize| (0..classes).map(|c| if c == best { 1.0 } else { 0.0 }).collect::<Vec<f32>>();
         let scores: Vec<f32> = [1, 1, 0, 2, 3, 3, 0, 3, 4].iter().flat_map(|b| step(*b)).collect();
-        assert_eq!(decode(&scores, 9, classes, &alphabet), "การร ");
-        assert_eq!(decode(&[], 0, 0, &alphabet), "");
-        assert_eq!(decode(&scores, 2, classes, &alphabet), "ก");
+        let text = |read: Vec<(String, usize)>| read.into_iter().map(|(s, _)| s).collect::<String>();
+        let read = decode(&scores, 9, classes, &alphabet);
+        assert_eq!(read.iter().map(|(_, at)| *at).collect::<Vec<_>>(), [0, 3, 4, 7, 8]);
+        assert_eq!(text(read), "การร ");
+        assert!(decode(&[], 0, 0, &alphabet).is_empty());
+        assert_eq!(text(decode(&scores, 2, classes, &alphabet)), "ก");
+    }
+
+    #[test]
+    fn a_line_keeps_its_text_whole_and_marks_where_each_word_starts() {
+        // "ราคา 90 บาท" read at evenly spaced steps across a line 0..220 wide.
+        let read: Vec<(String, usize)> = " ราคา 90 บาท ".chars().enumerate().map(|(i, c)| (c.to_string(), i * 2)).collect();
+        let found = line(&read, 26, [0.0, 10.0, 260.0, 40.0]).unwrap();
+        assert_eq!((found.text.as_str(), found.rect), ("ราคา 90 บาท", [0.0, 10.0, 260.0, 40.0]));
+        let starts: Vec<&str> = found.stops.iter().map(|(at, _)| &found.text[*at..]).collect();
+        assert_eq!(starts, ["ราคา 90 บาท", "90 บาท", "บาท"]);
+        // The first word is at the left end, and the stops move right and stay inside the line.
+        assert_eq!(found.stops[0].1, 0.0);
+        assert!(found.stops.windows(2).all(|p| p[0].1 < p[1].1) && found.stops.iter().all(|s| (0.0..=260.0).contains(&s.1)), "{:?}", found.stops);
+        // A Thai sentence without spaces still gets a stop per word.
+        let read: Vec<(String, usize)> = "ประเทศไทยมีพื้นที่".chars().enumerate().map(|(i, c)| (c.to_string(), i)).collect();
+        let found = line(&read, 18, [0.0, 0.0, 180.0, 20.0]).unwrap();
+        assert!(found.stops.len() >= 3 && found.text == "ประเทศไทยมีพื้นที่", "{found:?}");
+        assert!(found.stops.iter().all(|(at, _)| found.text.is_char_boundary(*at)));
+        assert!(line(&[], 10, [0.0; 4]).is_none() && line(&[(" ".into(), 1)], 4, [0.0, 0.0, 9.0, 9.0]).is_none());
     }
 
     #[test]
