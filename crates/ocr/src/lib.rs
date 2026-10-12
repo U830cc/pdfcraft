@@ -14,6 +14,9 @@ use std::path::{Path, PathBuf};
 
 pub use pdfcraft_fonts::helvetica_width;
 
+mod thai;
+pub use thai::{THAI_ALPHABET, THAI_DETECTION_MODEL, THAI_RECOGNITION_MODEL, ThaiModels, ThaiOcr};
+
 /// The model files, as named in ATTRIBUTION.toml.
 pub const DETECTION_MODEL: &str = "text-detection.rten";
 pub const RECOGNITION_MODEL: &str = "text-recognition.rten";
@@ -25,6 +28,11 @@ pub const ALPHABET: &str = " 0123456789!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~€ABCD
 
 /// The languages the models read (ISO 639-1); all use the Latin alphabet without accents.
 pub const LANGUAGES: &[(&str, &str)] = &[("en", "English")];
+
+/// Whether any recogniser's models are installed: the Latin ones, the Thai ones or both.
+pub fn installed() -> bool {
+    Models::find().is_some() || ThaiModels::find().is_some()
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum OcrError {
@@ -104,12 +112,21 @@ impl Line {
 }
 
 /// A loaded recogniser. Loading takes a moment; keep one and reuse it.
+///
+/// It holds the Latin engine, the Thai one or both, whichever models are installed. A page is
+/// read with the Thai models when they are there (they read the Latin letters in Thai documents
+/// too); a page they find no Thai on is read with the Latin engine, which reads Latin better.
 pub struct Ocr {
-    engine: ocrs::OcrEngine,
+    engine: Option<ocrs::OcrEngine>,
+    thai: Option<ThaiOcr>,
 }
 
 impl Ocr {
     pub fn load(models: &Models) -> Result<Ocr, OcrError> {
+        Ok(Ocr { engine: Some(Self::latin(models)?), thai: None })
+    }
+
+    fn latin(models: &Models) -> Result<ocrs::OcrEngine, OcrError> {
         let load = |p: &Path| rten::Model::load_file(p).map_err(|e| OcrError::Load(p.display().to_string(), e.to_string()));
         let params = ocrs::OcrEngineParams {
             detection_model: Some(load(&models.detection)?),
@@ -117,13 +134,28 @@ impl Ocr {
             alphabet: Some(ALPHABET.into()),
             ..Default::default()
         };
-        let engine = ocrs::OcrEngine::new(params).map_err(|e| OcrError::Load("ocr engine".into(), e.to_string()))?;
-        Ok(Ocr { engine })
+        ocrs::OcrEngine::new(params).map_err(|e| OcrError::Load("ocr engine".into(), e.to_string()))
     }
 
-    /// Load the models found by [`Models::find`].
+    /// A recogniser for Thai alone.
+    pub fn load_thai(models: &ThaiModels) -> Result<Ocr, OcrError> {
+        Ok(Ocr { engine: None, thai: Some(ThaiOcr::load(models)?) })
+    }
+
+    /// Load the models found by [`Models::find`] and [`ThaiModels::find`]; at least one set
+    /// must be installed.
     pub fn find() -> Result<Ocr, OcrError> {
-        Self::load(&Models::find().ok_or(OcrError::NoModels)?)
+        let engine = Models::find().map(|m| Self::latin(&m)).transpose()?;
+        let thai = ThaiModels::find().map(|m| ThaiOcr::load(&m)).transpose()?;
+        if engine.is_none() && thai.is_none() {
+            return Err(OcrError::NoModels);
+        }
+        Ok(Ocr { engine, thai })
+    }
+
+    /// Whether this recogniser reads Thai.
+    pub fn reads_thai(&self) -> bool {
+        self.thai.is_some()
     }
 
     /// Recognise the text in an RGBA (or RGB, or grey) image, `width` × `height` pixels.
@@ -131,18 +163,30 @@ impl Ocr {
         if width == 0 || height == 0 || pixels.is_empty() {
             return Err(OcrError::EmptyImage);
         }
-        // ocrs wants 1 or 3 channels.
-        let rgb: std::borrow::Cow<[u8]> = if pixels.len() == (width * height * 4) as usize {
+        let count = (width as usize).saturating_mul(height as usize);
+        // Both engines want 3 channels (ocrs also takes 1).
+        let rgb: std::borrow::Cow<[u8]> = if pixels.len() == count.saturating_mul(4) {
             pixels.as_chunks::<4>().0.iter().flat_map(|p| [p[0], p[1], p[2]]).collect::<Vec<u8>>().into()
         } else {
             pixels.into()
         };
+        if let Some(thai) = &self.thai {
+            // The Thai models take RGB only.
+            let colour: std::borrow::Cow<[u8]> =
+                if rgb.len() == count { rgb.iter().flat_map(|g| [*g, *g, *g]).collect::<Vec<u8>>().into() } else { rgb.clone() };
+            let lines = thai.recognize(&colour, width, height)?;
+            let has_thai = lines.iter().flat_map(|l| &l.words).any(|w| w.text.chars().any(pdfcraft_fonts::thai_break::is_thai));
+            if has_thai || self.engine.is_none() {
+                return Ok(lines);
+            }
+        }
+        let Some(engine) = &self.engine else { return Err(OcrError::NoModels) };
         let err = |e: &dyn std::fmt::Display| OcrError::Recognize(e.to_string());
         let source = ocrs::ImageSource::from_bytes(&rgb, (width, height)).map_err(|e| err(&e))?;
-        let input = self.engine.prepare_input(source).map_err(|e| err(&e))?;
-        let found = self.engine.detect_words(&input).map_err(|e| err(&e))?;
-        let lines = self.engine.find_text_lines(&input, &found);
-        let read = self.engine.recognize_text(&input, &lines).map_err(|e| err(&e))?;
+        let input = engine.prepare_input(source).map_err(|e| err(&e))?;
+        let found = engine.detect_words(&input).map_err(|e| err(&e))?;
+        let lines = engine.find_text_lines(&input, &found);
+        let read = engine.recognize_text(&input, &lines).map_err(|e| err(&e))?;
         use ocrs::TextItem;
         Ok(read
             .into_iter()
@@ -194,15 +238,62 @@ fn num(v: f64) -> String {
     if s == "-0" { "0".into() } else { s.into() }
 }
 
+/// A font of the page that holds text Helvetica can't (Thai): its resource name, and how it
+/// writes a string, giving the bytes to show and their width in em.
+pub struct UnicodeFont<'a> {
+    pub name: &'a str,
+    pub encode: &'a Encode<'a>,
+}
+
+/// A string as a font shows it: the bytes, and their width in em. `None` if the font lacks a
+/// character of it.
+pub type Encode<'a> = dyn Fn(&str) -> Option<(Vec<u8>, f64)> + 'a;
+
 /// Page content that writes `words` as invisible text in `/PCHelv` (standard Helvetica,
 /// WinAnsiEncoding), each word stretched to its box so selection and search highlight the
 /// right place. Marked content `/OCR` so it can be told apart from the page's own text.
 pub fn text_layer(words: &[PlacedWord]) -> Vec<u8> {
+    text_layer_with(words, None)
+}
+
+/// [`text_layer`], with the characters Helvetica can't hold written in `unicode` (and as `?`
+/// without it, or where it lacks them).
+pub fn text_layer_with(words: &[PlacedWord], unicode: Option<&UnicodeFont>) -> Vec<u8> {
     let mut out = b"/OCR BMC\nBT\n3 Tr\n/PCHelv 1 Tf\n".to_vec();
+    // The font selected so far: `false` is Helvetica.
+    let mut in_unicode = false;
     for w in words {
-        let width = helvetica_width(&w.text, 1.0);
+        // Runs in one font each: (in the Unicode font, bytes, width in em).
+        let mut runs: Vec<(bool, Vec<u8>, f64)> = Vec::new();
+        let mut plain = String::new();
+        let flush = |plain: &mut String, runs: &mut Vec<(bool, Vec<u8>, f64)>| {
+            if !plain.is_empty() {
+                runs.push((false, pdfcraft_fonts::win_ansi(plain), helvetica_width(plain, 1.0)));
+                plain.clear();
+            }
+        };
+        for c in w.text.chars() {
+            let mut buf = [0u8; 4];
+            let s = c.encode_utf8(&mut buf);
+            let other = if pdfcraft_fonts::first_non_win_ansi(s).is_some() { unicode.and_then(|f| (f.encode)(s)) } else { None };
+            match other {
+                Some((bytes, width)) => {
+                    flush(&mut plain, &mut runs);
+                    match runs.last_mut() {
+                        Some((true, last, total)) => {
+                            last.extend(bytes);
+                            *total += width;
+                        }
+                        _ => runs.push((true, bytes, width)),
+                    }
+                }
+                None => plain.push(c),
+            }
+        }
+        flush(&mut plain, &mut runs);
+        let width: f64 = runs.iter().map(|r| r.2).sum();
         let height = w.up[0].hypot(w.up[1]);
-        if width <= 0.0 || height <= 0.0 {
+        if !(width > 0.0 && height > 0.0) {
             continue;
         }
         // The em square: its height spans the box; its width is stretched to fit the word.
@@ -212,9 +303,18 @@ pub fn text_layer(words: &[PlacedWord]) -> Vec<u8> {
         let m = [ax[0], ax[1], em[0], em[1], o[0], o[1]];
         let nums: Vec<String> = m.iter().map(|v| num(*v)).collect();
         out.extend_from_slice(nums.join(" ").as_bytes());
-        out.extend_from_slice(b" Tm ");
-        out.extend(pdfcraft_fonts::literal(&pdfcraft_fonts::win_ansi(&w.text)));
-        out.extend_from_slice(b" Tj\n");
+        out.extend_from_slice(b" Tm");
+        for (other, bytes, _) in runs {
+            if other != in_unicode {
+                let name = unicode.filter(|_| other).map_or("PCHelv", |f| f.name);
+                out.extend(format!(" /{name} 1 Tf").bytes());
+                in_unicode = other;
+            }
+            out.push(b' ');
+            out.extend(pdfcraft_fonts::literal(&bytes));
+            out.extend_from_slice(b" Tj");
+        }
+        out.push(b'\n');
     }
     out.extend_from_slice(b"ET\nEMC\n");
     out
@@ -250,6 +350,27 @@ mod tests {
         let width = helvetica_width("Hi", 1.0);
         assert!(s.contains(&format!("{} 0 0 10 10 22.1 Tm (Hi) Tj", num(30.0 / width))), "{s}");
         assert!(s.starts_with("/OCR BMC") && s.ends_with("EMC\n"));
+    }
+
+    #[test]
+    fn thai_goes_to_the_unicode_font_and_latin_stays_in_helvetica() {
+        let w = PlacedWord { text: "ราคา 90 บาท".into(), origin: [10.0, 20.0], across: [60.0, 0.0], up: [0.0, 9.3] };
+        // Two bytes and half an em per character; nothing for a character it lacks.
+        let encode = |s: &str| {
+            s.chars()
+                .all(|c| c != 'บ')
+                .then(|| (s.chars().flat_map(|c| (u32::from(c) as u16).to_be_bytes()).collect::<Vec<u8>>(), 0.5 * s.chars().count() as f64))
+        };
+        let font = UnicodeFont { name: "PCThai", encode: &encode };
+        let s = String::from_utf8_lossy(&text_layer_with(std::slice::from_ref(&w), Some(&font))).into_owned();
+        // Thai run, Latin run, then Thai again with the missing letter left to Helvetica as `?`.
+        assert_eq!(s.matches("/PCThai 1 Tf").count(), 2, "{s}");
+        // Helvetica at the start, and once more after the first Thai run.
+        assert_eq!(s.matches("/PCHelv 1 Tf").count(), 2, "{s}");
+        assert!(s.contains("( 90 ?) Tj") && s.contains(" Tm /PCThai 1 Tf "), "{s}");
+        // Without the font every Thai letter is a `?`, as the plain layer writes it.
+        assert_eq!(text_layer(std::slice::from_ref(&w)), text_layer_with(std::slice::from_ref(&w), None));
+        assert!(String::from_utf8_lossy(&text_layer(&[w])).contains("(???? 90 ???) Tj"));
     }
 
     #[test]

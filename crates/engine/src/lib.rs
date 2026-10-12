@@ -2176,7 +2176,21 @@ fn run_edit(doc: &mut pdfcraft_cos::Document, edit: &Edit, cx: &mut EditCtx) -> 
         }
         Edit::SetDocumentScript { name, script } => pdfcraft_forms::set_document_script(doc, name, script.as_deref())?,
         Edit::AddOcrText { page, words } => {
-            pdfcraft_edit::stamp(doc, *page, "OCR", pdfcraft_ocr::text_layer(words))?;
+            // Recognised Thai needs a font that holds it: the Thai face, embedded in the page.
+            let thai = words.iter().any(|w| w.text.chars().any(pdfcraft_fonts::thai_break::is_thai));
+            let font = if thai { pdfcraft_edit::page_thai_font(doc, *page)? } else { None };
+            let layer = match &font {
+                Some((name, metrics)) => {
+                    let encode = |s: &str| {
+                        let bytes = metrics.encode(s)?;
+                        let width = metrics.codes(&bytes).iter().map(|(code, _)| metrics.width(*code)).sum();
+                        Some((bytes, width))
+                    };
+                    pdfcraft_ocr::text_layer_with(words, Some(&pdfcraft_ocr::UnicodeFont { name, encode: &encode }))
+                }
+                None => pdfcraft_ocr::text_layer(words),
+            };
+            pdfcraft_edit::stamp(doc, *page, "OCR", layer)?;
         }
         Edit::EditPageImage { page, index, change } => {
             let img = pdfcraft_edit::page_images(doc, *page)?

@@ -349,6 +349,24 @@ fn place_tagged(doc: &mut Document, page: &pdfcraft_model::Page, tag: &str, cont
     Ok(())
 }
 
+/// The Thai face as a font of the page (0-based): its resource name and metrics, for content that
+/// writes Thai there (a recognised-text layer). The face is embedded once per document and added
+/// to the page's own resources. `None` when this build has no Thai face.
+pub fn page_thai_font(doc: &mut Document, page: usize) -> Result<Option<(String, pdfcraft_fonts::pdf::Metrics)>, EditError> {
+    let (Some(face), Some(program)) = (pdfcraft_fonts::document_thai_font(), pdfcraft_fonts::document_thai_program()) else { return Ok(None) };
+    let all = page_list(doc);
+    check(&[page], all.len())?;
+    let Some(p) = all.get(page) else { return Ok(None) };
+    let mut res = p.dict.get(b"Resources").map(|r| doc.resolve(r)).and_then(|r| r.as_dict().cloned()).unwrap_or_default();
+    let mut fonts = res.get(b"Font").map(|f| doc.resolve(f)).and_then(|f| f.as_dict().cloned()).unwrap_or_default();
+    let name = pdfcraft_fonts::embedding::embed(doc, &mut fonts, program, face.family).map_err(EditError::Invalid)?;
+    let Some(font) = fonts.get(name.as_bytes()).and_then(|f| doc.dict(f)) else { return Ok(None) };
+    let metrics = pdfcraft_fonts::pdf::Metrics::from_dict(doc, &font);
+    res.set(b"Font".to_vec(), Object::Dict(fonts));
+    doc.update_dict(p.obj, |d| d.set(b"Resources".to_vec(), Object::Dict(res)))?;
+    Ok(Some((name, metrics)))
+}
+
 /// Draw `content` on top of a page (0-based) as permanent page content, with standard Helvetica
 /// available as `/PCHelv`. The stream is tagged `tag` (not a mark kind, so Remove never takes
 /// it away); the original content is wrapped in q/Q first. Used for applied redaction boxes.

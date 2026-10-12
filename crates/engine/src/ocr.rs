@@ -82,7 +82,7 @@ pub fn engine() -> Result<Arc<Ocr>, String> {
 
 /// Whether the recognition models are installed.
 pub fn available() -> bool {
-    Models::find().is_some()
+    pdfcraft_ocr::installed()
 }
 
 /// Everything recognition needs from a document, detached from the session.
