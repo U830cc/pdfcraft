@@ -44,6 +44,15 @@ fn no_thai_font() -> EditError {
     )
 }
 
+/// Whether two runs share a scope and a baseline direction (an oblique made by shearing the text
+/// matrix stands on the same baseline as the upright text around it).
+fn same_direction(a: &TextLine, b: &TextLine) -> bool {
+    let at = Matrix(a.origin.tm).then(&Matrix(a.origin.ctm));
+    let bt = Matrix(b.origin.tm).then(&Matrix(b.origin.ctm));
+    let (al, bl) = (at.0[0].hypot(at.0[1]), bt.0[0].hypot(bt.0[1]));
+    a.scope == b.scope && al > 0.0 && bl > 0.0 && (at.0[0] / al - bt.0[0] / bl).abs() < 0.001 && (at.0[1] / al - bt.0[1] / bl).abs() < 0.001
+}
+
 fn union(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
     [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])]
 }
@@ -80,10 +89,16 @@ fn ruled_below(rules: &[[f64; 4]], upper: [f64; 4], lower: [f64; 4]) -> bool {
     })
 }
 
-/// Exporters currently represent a block with one style. Keep their style boundaries until
-/// they support rich runs, while edit selection may encompass the complete visual region.
+/// Export blocks: one paragraph each, of one size. Runs of a sentence in another weight, slant
+/// or colour stay in it ([`TextBlock::style_runs`]); a heading or a line in another size does not.
 pub(super) fn group_reading_blocks(lines: &[TextLine], rules: &[[f64; 4]]) -> Vec<TextBlock> {
     group_layout(lines, false, rules)
+}
+
+/// Two runs of one sentence in different styles (weight, slant, colour or face) at one size.
+/// Export keeps them in one paragraph as separate runs.
+fn inline_run(a: &TextLine, b: &TextLine) -> bool {
+    (a.size - b.size).abs() < 0.01 && (a.rotation() - b.rotation()).abs() < 0.01
 }
 
 fn same_style(a: &TextLine, b: &TextLine) -> bool {
@@ -101,11 +116,12 @@ fn group_layout(lines: &[TextLine], mixed: bool, rules: &[[f64; 4]]) -> Vec<Text
     for (i, line) in lines.iter().enumerate() {
         let joins = rows.last().and_then(|r| r.last()).and_then(|i| lines.get(*i)).is_some_and(|prev| {
             let gap = line.rect[0] - prev.rect[2];
-            (mixed || same_style(prev, line))
-                && same_plane(prev, line)
+            (mixed || same_style(prev, line) || inline_run(prev, line))
+                && (same_plane(prev, line) || !mixed && prev.italic != line.italic && same_direction(prev, line))
                 && !ruled_apart(rules, prev.rect, line.rect)
                 && (prev.origin.baseline - line.origin.baseline).abs() < prev.size.min(line.size) * 0.2
-                && gap >= -prev.size.min(line.size) * 0.2
+                // A slanted run's box leans over the start of the upright run after it.
+                && gap >= -prev.size.min(line.size) * if !mixed && prev.italic && !line.italic { 0.5 } else { 0.2 }
                 && gap < prev.size.max(line.size) * 1.5
                 // Separate same-style text objects that merely touch or overlap, with no space
                 // between them, are separate labels (for example a paragraph dragged against
@@ -148,8 +164,14 @@ fn group_layout(lines: &[TextLine], mixed: bool, rules: &[[f64; 4]]) -> Vec<Text
             }
             let tol = prev.size.max(first.size).max(1.0);
             let aligned = (pr[0] - rect[0]).abs() < tol || ((pr[0] + pr[2] - rect[0] - rect[2]) / 2.0).abs() < tol || (pr[2] - rect[2]).abs() < tol;
-            (mixed || same_style(prev, first))
-                && same_plane(prev, first)
+            // A row of several styles (a bold word in a sentence) is body text: it continues the
+            // paragraph above, and the paragraph continues under it, at the same size.
+            let several = |r: &[usize]| {
+                r.first().and_then(|i| lines.get(*i)).is_some_and(|a| r.iter().filter_map(|i| lines.get(*i)).any(|b| !same_style(a, b)))
+            };
+            let continues = !mixed && (prev.size - first.size).abs() < 0.01 && (several(prev_row) || several(&row));
+            (mixed || same_style(prev, first) || continues)
+                && (same_plane(prev, first) || continues && same_direction(prev, first))
                 && !ruled_below(rules, pr, rect)
                 && aligned
                 && first.size.min(prev.size) >= first.size.max(prev.size) * 0.4
@@ -161,6 +183,7 @@ fn group_layout(lines: &[TextLine], mixed: bool, rules: &[[f64; 4]]) -> Vec<Text
                 text: String::new(),
                 editor_text: String::new(),
                 spans: Vec::new(),
+                marks: Vec::new(),
                 rect,
                 base_font: first.base_font.clone(),
                 size: first.size,
@@ -174,6 +197,8 @@ fn group_layout(lines: &[TextLine], mixed: bool, rules: &[[f64; 4]]) -> Vec<Text
         }
         let Some(block) = blocks.last_mut() else { continue };
         let mut row_text = String::new();
+        // Where each line of this row starts in `row_text`.
+        let mut row_marks: Vec<(usize, usize)> = Vec::new();
         if !block.rows.is_empty() {
             block.editor_text.push('\n');
         }
@@ -191,11 +216,13 @@ fn group_layout(lines: &[TextLine], mixed: bool, rules: &[[f64; 4]]) -> Vec<Text
             let start = block.editor_text.len();
             block.editor_text.push_str(&line.text);
             block.spans.push((start..block.editor_text.len(), index));
+            row_marks.push((row_text.len(), index));
             row_text.push_str(&line.text);
             block.lines.push(index);
         }
         // A producer that keeps the space it wrapped at (Word does; Chrome drops it) says so here.
         let spaced = row_text.starts_with(paragraph_separator) || std::mem::replace(&mut ends_spaced, row_text.ends_with(paragraph_separator));
+        let lead = row_text.len() - row_text.trim_start_matches(paragraph_separator).len();
         let row_text = row_text.trim_matches(paragraph_separator);
         if !block.text.is_empty() {
             if block.text.ends_with('-') {
@@ -204,6 +231,8 @@ fn group_layout(lines: &[TextLine], mixed: bool, rules: &[[f64; 4]]) -> Vec<Text
                 block.text.push(' ');
             }
         }
+        let base = block.text.len();
+        block.marks.extend(row_marks.into_iter().map(|(at, index)| (base + at.saturating_sub(lead).min(row_text.len()), index)));
         block.text.push_str(row_text);
         block.rect = union(block.rect, rect);
         block.rows.push(row);

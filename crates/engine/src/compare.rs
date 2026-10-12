@@ -171,20 +171,43 @@ impl crate::Document {
                 let crop_width = f64::from(info.crop[2] - info.crop[0]);
                 let display_width = f64::from(if info.rotation % 180 == 0 { info.width } else { info.height });
                 let unit = if crop_width > 0.0 && crop_width.is_finite() && display_width.is_finite() { display_width / crop_width } else { 1.0 };
-                let blocks = pdfcraft_edit::reading_blocks(cos, i)
-                    .unwrap_or_default()
+                let reading = pdfcraft_edit::reading_blocks_with_lines(cos, i).unwrap_or_default();
+                let weight = |font: &str| {
+                    let f = font.to_ascii_lowercase();
+                    (f.contains("bold") || f.contains("black") || f.contains("heavy"), f.contains("italic") || f.contains("oblique"))
+                };
+                let blocks = reading
+                    .0
                     .into_iter()
                     .filter(|b| !b.text.trim().is_empty())
                     .map(|b| {
-                        let f = b.base_font.to_ascii_lowercase();
+                        // Neighbouring source lines in one style are one run.
+                        let mut runs: Vec<pdfcraft_export::Run> = Vec::new();
+                        for (range, line) in b.style_runs() {
+                            let Some(line) = reading.1.get(line) else { continue };
+                            let (bold, italic) = weight(&line.base_font);
+                            let (bold, italic) = (bold || line.bold, italic || line.italic);
+                            let text = b.text.get(range).unwrap_or_default();
+                            match runs.last_mut() {
+                                Some(last) if last.bold == bold && last.italic == italic && last.color == line.color => last.text.push_str(text),
+                                _ => runs.push(pdfcraft_export::Run { text: text.to_string(), bold, italic, color: line.color }),
+                            }
+                        }
+                        // The block is bold or italic when all of it is; one run needs no list.
+                        let (bold, italic) =
+                            if runs.is_empty() { weight(&b.base_font) } else { (runs.iter().all(|r| r.bold), runs.iter().all(|r| r.italic)) };
+                        if runs.len() < 2 {
+                            runs.clear();
+                        }
                         pdfcraft_export::Block {
                             text: b.text,
                             rect: visible_rect(b.rect),
                             size: b.size * unit,
-                            bold: f.contains("bold") || f.contains("black") || f.contains("heavy"),
-                            italic: f.contains("italic") || f.contains("oblique"),
+                            bold,
+                            italic,
                             color: b.color,
                             rotation: b.rotation - f64::from(info.rotation),
+                            runs,
                         }
                     })
                     .collect();

@@ -162,7 +162,7 @@ pub fn pptx(pages: &[Page], title: &str) -> Vec<u8> {
 
         if let Some(title_block) = title_idx.and_then(|ti| p.blocks.get(ti)) {
             let title_h = height_emu((title_block.size * 1.5).max(36.0));
-            let title_run = run_drawingml(&title_block.text, title_block.size, title_block.bold, title_block.italic, title_block.color);
+            let title_run = crate::styled(title_block, |text, bold, italic, color| run_drawingml(text, title_block.size, bold, italic, color));
             shapes.push_str(&format!(
                 "<p:sp><p:nvSpPr><p:cNvPr id=\"{shape_id}\" name=\"Title {shape_id}\"/><p:cNvSpPr txBox=\"1\"/><p:nvPr/></p:nvSpPr>\
 <p:spPr><a:xfrm><a:off x=\"{mx}\" y=\"{current_y}\"/><a:ext cx=\"{content_w}\" cy=\"{title_h}\"/></a:xfrm><a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom><a:noFill/></p:spPr>\
@@ -179,7 +179,7 @@ pub fn pptx(pages: &[Page], title: &str) -> Vec<u8> {
                     let mut paras_xml = String::new();
                     let mut est_h_pt = 0.0;
                     while let Some((_, _, SlideBodyItem::Para(b))) = items.get(i) {
-                        let run = run_drawingml(&b.text, b.size, b.bold, b.italic, b.color);
+                        let run = crate::styled(b, |text, bold, italic, color| run_drawingml(text, b.size, bold, italic, color));
                         paras_xml.push_str(&format!("<a:p>{run}</a:p>"));
                         let lines = (b.text.len() as f64 / 60.0).ceil().max(1.0);
                         est_h_pt += (b.size.max(10.0) * 1.3) * lines + 6.0;
@@ -368,6 +368,7 @@ mod tests {
             height: 540.0,
             blocks: vec![
                 Block {
+                    runs: Vec::new(),
                     text: "Q3 Business Update".into(),
                     rect: [72.0, 460.0, 500.0, 500.0],
                     size: 28.0,
@@ -377,6 +378,7 @@ mod tests {
                     rotation: 0.0,
                 },
                 Block {
+                    runs: Vec::new(),
                     text: "Revenue grew 25% year over year across all regions.".into(),
                     rect: [72.0, 380.0, 500.0, 410.0],
                     size: 14.0,
@@ -386,6 +388,7 @@ mod tests {
                     rotation: 0.0,
                 },
                 Block {
+                    runs: Vec::new(),
                     text: "Operational expenses remained flat.".into(),
                     rect: [72.0, 340.0, 500.0, 370.0],
                     size: 14.0,
@@ -508,6 +511,7 @@ mod tests {
     #[test]
     fn pptx_package_parts_are_complete_and_consistent() {
         let cell = |t: &str, x: f64, y: f64| Block {
+            runs: Vec::new(),
             text: t.into(),
             rect: [x, y, x + 100.0, y + 14.0],
             size: 12.0,
@@ -609,6 +613,7 @@ mod tests {
     #[test]
     fn hostile_sizes_do_not_overflow_the_slide_position() {
         let huge = |text: &str, size: f64, y: f64| Block {
+            runs: Vec::new(),
             text: text.into(),
             rect: [72.0, y, 500.0, y + 10.0],
             size,
@@ -674,6 +679,7 @@ mod tests {
     #[test]
     fn pptx_table_cell_with_largest_font_stays_in_table_and_not_in_title() {
         let cell = |t: &str, x: f64, y: f64, w: f64, sz: f64| Block {
+            runs: Vec::new(),
             text: t.into(),
             rect: [x, y, x + w, y + 14.0],
             size: sz,
@@ -689,6 +695,7 @@ mod tests {
             blocks: vec![
                 // Heading outside the table (short width, does not span table columns)
                 Block {
+                    runs: Vec::new(),
                     text: "Monthly Summary".into(),
                     rect: [50.0, 480.0, 150.0, 500.0],
                     size: 20.0,

@@ -246,9 +246,25 @@ pub struct TextBlock {
     pub editor_text: String,
     /// Byte ranges in `editor_text` and their source line indexes.
     pub spans: Vec<(std::ops::Range<usize>, usize)>,
+    /// Where each source line's text starts in `text` (byte offset, line index), in order.
+    pub marks: Vec<(usize, usize)>,
 }
 
 impl TextBlock {
+    /// `text` cut into the stretches each source line contributed (byte range, line index): the
+    /// block's style runs. A separator between two lines belongs to the first.
+    pub fn style_runs(&self) -> Vec<(std::ops::Range<usize>, usize)> {
+        let mut out: Vec<(std::ops::Range<usize>, usize)> = Vec::new();
+        for (i, (start, line)) in self.marks.iter().enumerate() {
+            let start = if i == 0 { 0 } else { (*start).min(self.text.len()) };
+            let end = self.marks.get(i + 1).map_or(self.text.len(), |(next, _)| (*next).min(self.text.len()));
+            if end > start && self.text.is_char_boundary(start) && self.text.is_char_boundary(end) {
+                out.push((start..end, *line));
+            }
+        }
+        out
+    }
+
     /// Preserve styles outside the changed range; inserted characters inherit the surrounding
     /// source run. Byte ranges are always UTF-8 boundaries. Linear time, including large edits.
     pub fn edited_spans(&self, draft: &str) -> Vec<(std::ops::Range<usize>, usize)> {
@@ -677,7 +693,14 @@ fn interpret(
                 let rect = corners
                     .iter()
                     .fold([f64::MAX, f64::MAX, f64::MIN, f64::MIN], |b, p| [b[0].min(p.0), b[1].min(p.1), b[2].max(p.0), b[3].max(p.1)]);
-                let size_user = (trm0.0[2].powi(2) + trm0.0[3].powi(2)).sqrt() * ts.size;
+                // A sheared text matrix is an oblique made from an upright face (Chrome slants Thai
+                // this way, having no italic for it): the size is the height across the baseline,
+                // not the length of the slanted axis, and the text is italic.
+                let [a, b, c, d, ..] = trm0.0;
+                let along = a.hypot(b);
+                let (upright, lean) = if along > 0.0 { ((a * d - b * c).abs() / along, (a * c + b * d) / along) } else { (0.0, 0.0) };
+                let oblique = upright > 0.0 && (0.1..=0.7).contains(&(lean / upright));
+                let size_user = if oblique { upright } else { c.hypot(d) } * ts.size;
                 // A numeric-only TJ adjusts the current text matrix but paints no glyphs.
                 // It must not create a phantom editable line or enlarge its neighbours' boxes.
                 if !pieces.iter().any(|p| matches!(p, Object::String(s) if !s.bytes.is_empty())) {
@@ -703,7 +726,7 @@ fn interpret(
                     face: ts.face.clone(),
                     size: if size_user > 0.0 { size_user } else { ts.size },
                     bold: m.bold,
-                    italic: m.italic,
+                    italic: m.italic || oblique,
                     decodable,
                     scope: marked.last().copied().flatten(),
                 });
@@ -1533,6 +1556,14 @@ pub fn reading_blocks(doc: &Document, page: usize) -> Result<Vec<TextBlock>, Edi
     // Ruling lines keep the text of neighbouring table cells in separate blocks.
     let rules = crate::rules::page_rules(doc, page).unwrap_or_default();
     Ok(regions::group_reading_blocks(&lines, &rules))
+}
+
+/// [`reading_blocks`] with the lines its blocks index (`TextBlock::lines`, `TextBlock::style_runs`).
+pub fn reading_blocks_with_lines(doc: &Document, page: usize) -> Result<(Vec<TextBlock>, Vec<TextLine>), EditError> {
+    let lines = reading_lines(doc, page)?;
+    let rules = crate::rules::page_rules(doc, page).unwrap_or_default();
+    let blocks = regions::group_reading_blocks(&lines, &rules);
+    Ok((blocks, lines))
 }
 
 // An ideographic space carries intentional Japanese spacing, including paragraph indentation.

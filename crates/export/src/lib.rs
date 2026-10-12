@@ -28,6 +28,27 @@ pub struct Block {
     pub color: [f64; 3],
     /// Counterclockwise baseline angle in user space (degrees).
     pub rotation: f64,
+    /// The text as runs of one style each, in order (a bold word inside a sentence, say).
+    /// Joined they are `text`. Empty when the whole block has the block's style.
+    pub runs: Vec<Run>,
+}
+
+/// A stretch of a block's text in one style.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Run {
+    pub text: String,
+    pub bold: bool,
+    pub italic: bool,
+    pub color: [f64; 3],
+}
+
+/// A block's runs written one after another with `write(text, bold, italic, colour)`: its own
+/// [`Block::runs`], or the whole text in the block's style when it has none.
+pub(crate) fn styled(b: &Block, write: impl Fn(&str, bool, bool, [f64; 3]) -> String) -> String {
+    if b.runs.is_empty() {
+        return write(&b.text, b.bold, b.italic, b.color);
+    }
+    b.runs.iter().filter(|r| !r.text.is_empty()).map(|r| write(&r.text, r.bold, r.italic, r.color)).collect()
 }
 
 /// An image of a page.
@@ -536,13 +557,20 @@ table{{border-collapse:collapse;margin:1em 0}}td,th{{border:1px solid #999;paddi
     for it in items(pages) {
         match it {
             Item::Para(b, lvl) => {
-                let mut t = esc(&b.text);
-                if b.italic {
-                    t = format!("<em>{t}</em>");
-                }
-                if b.bold && lvl == 0 {
-                    t = format!("<strong>{t}</strong>");
-                }
+                // A heading is bold already; a run in another colour than the block's says so.
+                let t = styled(b, |text, bold, italic, color| {
+                    let mut t = esc(text);
+                    if italic {
+                        t = format!("<em>{t}</em>");
+                    }
+                    if bold && lvl == 0 {
+                        t = format!("<strong>{t}</strong>");
+                    }
+                    match hex(color).filter(|_| rgb8(color) != rgb8(b.color)) {
+                        Some(h) => format!("<span style=\"color:#{h}\">{t}</span>"),
+                        None => t,
+                    }
+                });
                 let style = hex(b.color).map_or(String::new(), |h| format!(" style=\"color:#{h}\""));
                 match lvl {
                     0 => s.push_str(&format!("<p{style}>{t}</p>\n")),
@@ -729,7 +757,7 @@ fn positioned_page<'a>(page: &'a Page, media: &mut Vec<(String, &'a Image)>, sha
         );
         s.push_str(&format!(
             "<w:r><w:pict><v:rect id=\"Text{}\" style=\"{style}\" filled=\"f\" stroked=\"f\"><v:textbox inset=\"0,0,0,0\" style=\"mso-fit-shape-to-text:t\"><w:txbxContent><w:p><w:pPr><w:spacing w:before=\"0\" w:after=\"0\"/></w:pPr>{}</w:p></w:txbxContent></v:textbox><w10:wrap type=\"none\"/></v:rect></w:pict></w:r>",
-            shape_id, run_xml(&b.text, b.size, b.bold, b.italic, b.color)
+            shape_id, styled(b, |text, bold, italic, color| run_xml(text, b.size, bold, italic, color))
         ));
     }
     for im in &page.images {
@@ -767,7 +795,7 @@ pub fn docx(pages: &[Page], title: &str) -> Vec<u8> {
     let mut media: Vec<(String, &Image)> = Vec::new();
     // Word needs a paragraph between adjacent tables and after the last one in the body.
     let mut after_table = false;
-    let run = |b: &Block| run_xml(&b.text, b.size, b.bold, b.italic, b.color);
+    let run = |b: &Block| styled(b, |text, bold, italic, color| run_xml(text, b.size, bold, italic, color));
     let mut shape_id = 0usize;
     for (page_index, page) in pages.iter().enumerate() {
         let (pw, _) = word_page_size(page);
@@ -915,7 +943,10 @@ pub fn rtf(pages: &[Page]) -> String {
     };
     for it in &items {
         match it {
-            Item::Para(b, _) => note(b.color),
+            Item::Para(b, _) => {
+                note(b.color);
+                b.runs.iter().for_each(|r| note(r.color));
+            }
             Item::Table(t) => t.rows.iter().flatten().for_each(|c| note(c.color)),
             Item::Img(_) | Item::PageBreak => {}
         }
@@ -953,16 +984,25 @@ pub fn rtf(pages: &[Page]) -> String {
     for it in items {
         match it {
             Item::Para(b, _) => {
-                let mut fmt = format!("\\fs{}", (b.size * 2.0).round() as i64);
-                if b.bold {
-                    fmt.push_str("\\b");
+                let format = |text: &str, bold: bool, italic: bool, color: [f64; 3]| {
+                    let mut fmt = format!("\\fs{}", (b.size * 2.0).round() as i64);
+                    if bold {
+                        fmt.push_str("\\b");
+                    }
+                    if italic {
+                        fmt.push_str("\\i");
+                    }
+                    fmt.push_str(&cf(color));
+                    fmt.push_str(&complex(text, b.size, bold, italic));
+                    fmt
+                };
+                if b.runs.len() < 2 {
+                    s.push_str(&format!("{{\\pard{} {}\\par}}\n", format(&b.text, b.bold, b.italic, b.color), rtf_text(&b.text)));
+                } else {
+                    // Each run is its own group, so its formatting ends with it.
+                    let runs = styled(b, |text, bold, italic, color| format!("{{{} {}}}", format(text, bold, italic, color), rtf_text(text)));
+                    s.push_str(&format!("{{\\pard {runs}\\par}}\n"));
                 }
-                if b.italic {
-                    fmt.push_str("\\i");
-                }
-                fmt.push_str(&cf(b.color));
-                fmt.push_str(&complex(&b.text, b.size, b.bold, b.italic));
-                s.push_str(&format!("{{\\pard{fmt} {}\\par}}\n", rtf_text(&b.text)));
             }
             Item::Table(t) => {
                 let mut edges = t.cols.clone();
@@ -1008,6 +1048,7 @@ mod tests {
 
     fn page() -> Page {
         let b = |t: &str, y: f64, size: f64, bold: bool| Block {
+            runs: Vec::new(),
             text: t.into(),
             rect: [72.0, y, 500.0, y + size],
             size,
@@ -1090,6 +1131,7 @@ mod tests {
     fn word_overlap_does_not_consume_invoice_body_space() {
         let mut p = table_page();
         p.blocks.push(Block {
+            runs: Vec::new(),
             text: "DRAFT".into(),
             rect: [100.0, 200.0, 500.0, 700.0],
             size: 100.0,
@@ -1151,6 +1193,7 @@ mod tests {
         let mut p = page();
         p.height = 2400.0;
         p.blocks.push(Block {
+            runs: Vec::new(),
             text: "Total\u{0}\u{3}\u{c} 4.50\u{FFFF}\tGBP".into(),
             rect: [72.0, 100.0, 300.0, 110.0],
             size: f64::NAN,
@@ -1202,6 +1245,7 @@ mod tests {
 
     fn thai_page() -> Page {
         let b = |t: &str, y: f64, size: f64, bold: bool, italic: bool| Block {
+            runs: Vec::new(),
             text: t.into(),
             rect: [72.0, y, 500.0, y + size],
             size,
@@ -1255,6 +1299,7 @@ mod tests {
     #[test]
     fn a_ruled_grid_is_a_bordered_table_with_spans() {
         let b = |t: &str, x: f64, y: f64, bold: bool| Block {
+            runs: Vec::new(),
             text: t.into(),
             rect: [x, y, x + 40.0, y + 12.0],
             size: 12.0,
@@ -1313,10 +1358,49 @@ mod tests {
         assert!(ruled_tables(&empty.blocks, &empty.rules).0.is_empty());
     }
 
+    /// A bold word and a slanted one inside a sentence stay in its paragraph, each as a run.
+    #[test]
+    fn style_runs_stay_in_one_paragraph_in_every_format() {
+        let run = |text: &str, bold: bool, italic: bool, color: [f64; 3]| Run { text: text.into(), bold, italic, color };
+        let block = Block {
+            text: "ตัวหนา และ ตัวเอียง ปนกับ English".into(),
+            rect: [72.0, 600.0, 500.0, 614.0],
+            size: 14.0,
+            bold: false,
+            italic: false,
+            color: [0.0; 3],
+            rotation: 0.0,
+            runs: vec![
+                run("ตัวหนา ", true, false, [0.0; 3]),
+                run("และ ", false, false, [0.0; 3]),
+                run("ตัวเอียง", false, true, [1.0, 0.0, 0.0]),
+                run(" ปนกับ English", false, false, [0.0; 3]),
+            ],
+        };
+        assert_eq!(block.runs.iter().map(|r| r.text.as_str()).collect::<String>(), block.text);
+        let page = Page { width: 612.0, height: 792.0, blocks: vec![block], ..Page::default() };
+        let pages = std::slice::from_ref(&page);
+        let h = html(pages, "t");
+        assert!(h.contains("<p><strong>ตัวหนา </strong>และ <span style=\"color:#FF0000\"><em>ตัวเอียง</em></span> ปนกับ English</p>"), "{h}");
+        let doc = part(&docx(pages, "t"), "word/document.xml");
+        assert_eq!(doc.matches("<w:p>").count(), 1, "{doc}");
+        assert_eq!(doc.matches("<w:r>").count(), 4, "{doc}");
+        assert!(doc.contains("<w:b/><w:bCs/><w:sz w:val=\"28\"/>") && doc.contains("<w:i/><w:iCs/><w:color w:val=\"FF0000\"/>"), "{doc}");
+        let slide = part(&pptx(pages, "t"), "ppt/slides/slide1.xml");
+        assert!(slide.contains(" b=\"1\"") && slide.contains(" i=\"1\"") && slide.matches("<a:r>").count() == 4, "{slide}");
+        let r = rtf(pages);
+        assert_eq!(r.matches("\\pard").count(), 1, "{r}");
+        assert!(r.contains("{\\fs28\\b\\af1") && r.contains("{\\fs28\\i\\cf1\\af1") && r.contains("\\par}"), "{r}");
+        // Without runs the block is written whole in its own style, as before.
+        let plain = Page { blocks: vec![Block { runs: Vec::new(), italic: true, ..page.blocks[0].clone() }], ..page.clone() };
+        assert!(html(std::slice::from_ref(&plain), "t").contains("<p><em>ตัวหนา และ ตัวเอียง ปนกับ English</em></p>"));
+    }
+
     #[test]
     fn rtf_escapes_and_sizes() {
         let mut p = page();
         p.blocks.push(Block {
+            runs: Vec::new(),
             text: "Café {x}".into(),
             rect: [72.0, 100.0, 200.0, 110.0],
             size: 10.0,
@@ -1334,6 +1418,7 @@ mod tests {
     /// A 3-column table with a spanning header row and a hole in the last row.
     fn table_page() -> Page {
         let cell = |t: &str, x: f64, y: f64, w: f64| Block {
+            runs: Vec::new(),
             text: t.into(),
             rect: [x, y, x + w, y + 12.0],
             size: 11.0,
@@ -1358,6 +1443,7 @@ mod tests {
                 // A2's row is missing its third cell (an empty cell in the grid).
                 cell("Totals", 72.0, 530.0, 240.0),
                 Block {
+                    runs: Vec::new(),
                     text: "Notes follow the table and are long enough to be the body text size of the page here.".into(),
                     rect: [72.0, 460.0, 500.0, 471.0],
                     size: 11.0,
@@ -1416,7 +1502,16 @@ mod tests {
             .map(|i| {
                 let (row, col) = (i / 2, i / 2 + i % 2);
                 let (x, y) = (10.0 + col as f64 * 20.0, 10_000.0 - row as f64 * 14.0);
-                Block { text: "x".into(), rect: [x, y, x + 8.0, y + 12.0], size: 11.0, bold: false, italic: false, color: [0.0; 3], rotation: 0.0 }
+                Block {
+                    runs: Vec::new(),
+                    text: "x".into(),
+                    rect: [x, y, x + 8.0, y + 12.0],
+                    size: 11.0,
+                    bold: false,
+                    italic: false,
+                    color: [0.0; 3],
+                    rotation: 0.0,
+                }
             })
             .collect();
         let started = std::time::Instant::now();
@@ -1437,6 +1532,7 @@ mod tests {
                     (0..n).map(move |col| {
                         let (x, y) = (20.0 + col as f64 * 22.0, 700.0 - row as f64 * 14.0);
                         Block {
+                            runs: Vec::new(),
                             text: (col + 1).to_string(),
                             rect: [x, y, x + 8.0, y + 8.0],
                             size: 8.0,
@@ -1459,6 +1555,7 @@ mod tests {
     #[test]
     fn two_column_body_text_is_not_mistaken_for_a_table() {
         let para = |t: &str, x: f64, y: f64| Block {
+            runs: Vec::new(),
             text: t.into(),
             rect: [x, y, x + 200.0, y + 90.0], // nine lines tall: body text, not a cell
             size: 11.0,
