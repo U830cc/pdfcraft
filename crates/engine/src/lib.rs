@@ -47,6 +47,8 @@ pub use pdfcraft_create::{CONVERTIBLE, CreateError, ImageResolution, SourceKind,
 pub use pdfcraft_edit::{
     Added, AddedImage, AddedText, Align as TextAlign, Background, Content as AddedContent, Family as FontFamily, HeaderFooter, MarkKind, Watermark,
 };
+/// Edit text by line or by visual region: see [`pdfcraft_edit::set_line_regions`].
+pub use pdfcraft_edit::{line_regions, set_line_regions};
 pub use pdfcraft_forms::{
     BorderStyle, CheckStyle, Field as FormField, FieldAction, FieldChange, FieldFont, FieldKind as FormFieldKind, FieldProps, FieldValue,
     Look as FieldLook, LookPatch as FieldLookPatch, NewField, TabOrder, Trigger as FieldTrigger, Widget as FormWidget, af as form_scripts,

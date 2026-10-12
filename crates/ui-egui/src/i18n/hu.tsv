@@ -2201,6 +2201,8 @@ action wizard	Start	Indítás
 @plural	{n} object selected|{n} objects selected	{n} objektum kijelölve|{n} objektum kijelölve
 	Drag the selection to move it. Esc clears the selection.	A kijelölés áthelyezéséhez húzza azt. Az Esc törli a kijelölést.
 	Shift-click to select several objects. Drag empty space to select an area.	Több objektum kijelöléséhez kattintson a Shift lenyomásával. Terület kijelöléséhez húzzon az üres részen.
+	Edit each line separately	Minden sor külön szerkesztése
+	Each line of text becomes its own box, so one line can be changed without touching the lines around it.	Minden szövegsor saját keretet kap, így egy sor a körülötte lévő sorok érintése nélkül módosítható.
 	Select at most 1000 objects at a time.	Egyszerre legfeljebb 1000 objektumot jelöljön ki.
 	Finish or discard the text being edited before selecting several objects.	Több objektum kijelölése előtt fejezze be vagy vesse el a szöveg szerkesztését.
 	Move object	Objektum áthelyezése

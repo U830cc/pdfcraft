@@ -2225,6 +2225,8 @@ certificate	Subject	صاحب الشهادة
 @plural	{n} object selected|{n} objects selected	تم تحديد {n} عنصر|تم تحديد {n} عنصر|تم تحديد {n} عنصرين|تم تحديد {n} عناصر|تم تحديد {n} عنصرًا|تم تحديد {n} عنصر
 	Drag the selection to move it. Esc clears the selection.	اسحب التحديد لنقله. يمسح Esc التحديد.
 	Shift-click to select several objects. Drag empty space to select an area.	انقر مع الضغط على Shift لتحديد عدة عناصر. اسحب في مساحة فارغة لتحديد منطقة.
+	Edit each line separately	تحرير كل سطر على حدة
+	Each line of text becomes its own box, so one line can be changed without touching the lines around it.	يصبح كل سطر من النص في مربع خاص به، فيمكن تغيير سطر واحد دون المساس بالأسطر المحيطة به.
 	Select at most 1000 objects at a time.	حدد 1000 عنصر كحد أقصى في المرة الواحدة.
 	Finish or discard the text being edited before selecting several objects.	أكمل تحرير النص أو تجاهله قبل تحديد عدة عناصر.
 	Move object	نقل عنصر

@@ -2170,6 +2170,8 @@
 @plural	{n} object selected|{n} objects selected	已选择 {n} 个对象
 	Drag the selection to move it. Esc clears the selection.	拖动选区即可移动。按 Esc 清除选择。
 	Shift-click to select several objects. Drag empty space to select an area.	按住 Shift 单击可选择多个对象。拖动空白区域可框选。
+	Edit each line separately	逐行单独编辑
+	Each line of text becomes its own box, so one line can be changed without touching the lines around it.	每一行文本都成为独立的文本框，因此可以只修改一行而不影响周围的行。
 	Select at most 1000 objects at a time.	一次最多选择 1000 个对象。
 	Finish or discard the text being edited before selecting several objects.	请先完成或放弃正在编辑的文本，再选择多个对象。
 	Move object	移动对象

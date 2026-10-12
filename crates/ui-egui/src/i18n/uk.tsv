@@ -2226,6 +2226,8 @@ certificate	Subject	Власник сертифіката
 @plural	{n} object selected|{n} objects selected	Виділено {n} об’єкт|Виділено {n} об’єкти|Виділено {n} об’єктів
 	Drag the selection to move it. Esc clears the selection.	Перетягніть виділення, щоб перемістити його. Esc скасовує виділення.
 	Shift-click to select several objects. Drag empty space to select an area.	Клацніть із Shift, щоб вибрати кілька об’єктів. Протягніть рамку на порожньому місці, щоб виділити область.
+	Edit each line separately	Редагувати кожен рядок окремо
+	Each line of text becomes its own box, so one line can be changed without touching the lines around it.	Кожен рядок тексту отримує власну рамку, тож один рядок можна змінити, не зачіпаючи сусідні.
 	Select at most 1000 objects at a time.	Вибирайте не більше 1000 об’єктів одночасно.
 	Finish or discard the text being edited before selecting several objects.	Завершіть або скасуйте редагування тексту, перш ніж вибирати кілька об’єктів.
 	Move object	Перемістити об’єкт

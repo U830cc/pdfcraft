@@ -2167,6 +2167,8 @@ key	Space	Boşluk
 @plural	{n} object selected|{n} objects selected	{n} nesne seçildi
 	Drag the selection to move it. Esc clears the selection.	Taşımak için seçimi sürükleyin. Esc seçimi temizler.
 	Shift-click to select several objects. Drag empty space to select an area.	Birden çok nesne seçmek için Shift tuşuna basarak tıklayın. Bir alanı seçmek için boş alanı sürükleyin.
+	Edit each line separately	Her satırı ayrı düzenle
+	Each line of text becomes its own box, so one line can be changed without touching the lines around it.	Her metin satırı kendi kutusuna sahip olur; böylece bir satır, çevresindeki satırlara dokunmadan değiştirilebilir.
 	Select at most 1000 objects at a time.	Bir seferde en fazla 1000 nesne seçin.
 	Finish or discard the text being edited before selecting several objects.	Birden fazla nesne seçmeden önce düzenlenen metni tamamlayın veya iptal edin.
 	Move object	Nesneyi taşı

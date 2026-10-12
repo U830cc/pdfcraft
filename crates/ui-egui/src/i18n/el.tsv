@@ -1584,6 +1584,8 @@
 	 ({n} at {dpi} dpi, the largest size they can be drawn at)	 ({n} στα {dpi} dpi, το μεγαλύτερο μέγεθος στο οποίο μπορούν να αποδοθούν)
 	Drag the selection to move it. Esc clears the selection.	Σύρετε την επιλογή για να τη μετακινήσετε. Το Esc καταργεί την επιλογή.
 	Shift-click to select several objects. Drag empty space to select an area.	Κάντε κλικ με πατημένο το Shift για επιλογή πολλών αντικειμένων. Σύρετε σε κενό χώρο για να επιλέξετε περιοχή.
+	Edit each line separately	Επεξεργασία κάθε γραμμής ξεχωριστά
+	Each line of text becomes its own box, so one line can be changed without touching the lines around it.	Κάθε γραμμή κειμένου αποκτά το δικό της πλαίσιο, ώστε μια γραμμή να μπορεί να αλλάξει χωρίς να επηρεαστούν οι γύρω γραμμές.
 	Select at most 1000 objects at a time.	Επιλέξτε έως 1.000 αντικείμενα κάθε φορά.
 	Finish or discard the text being edited before selecting several objects.	Ολοκληρώστε ή απορρίψτε την επεξεργασία κειμένου προτού επιλέξετε πολλά αντικείμενα.
 	Move object	Μετακίνηση αντικειμένου

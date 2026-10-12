@@ -176,6 +176,8 @@
 @plural	{n} field name collides with earlier files and will be renamed: {list}|{n} field names collide with earlier files and will be renamed: {list}	{n} název pole koliduje s dřívějšími soubory a bude přejmenován: {list}|Názvy {n} polí kolidují s dřívějšími soubory a budou přejmenovány: {list}|{n} názvů polí koliduje s dřívějšími soubory a bude přejmenováno: {list}
 	Drag the selection to move it. Esc clears the selection.	Přetažením výběr přesunete. Esc zruší výběr.
 	Shift-click to select several objects. Drag empty space to select an area.	Kliknutím se Shiftem vyberete více objektů. Tažením v prázdném místě vyberete oblast.
+	Edit each line separately	Upravovat každý řádek zvlášť
+	Each line of text becomes its own box, so one line can be changed without touching the lines around it.	Každý řádek textu dostane vlastní rámeček, takže lze změnit jeden řádek, aniž by se změnily řádky kolem něj.
 	Select at most 1000 objects at a time.	Vyberte nejvýše 1000 objektů najednou.
 	Finish or discard the text being edited before selecting several objects.	Před výběrem více objektů dokončete nebo zahoďte úpravu textu.
 	Move object	Přesunout objekt

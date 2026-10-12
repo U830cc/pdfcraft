@@ -3093,3 +3093,25 @@ fn marked_paragraph_boundaries_and_cross_stream_transforms_survive_rewrite() {
     }
     assert_eq!(after[1].text, "Changed row");
 }
+
+/// Edit each line separately: a heading, a two-line paragraph and a line after it are one region
+/// by default and four when every row is its own; a row keeps its runs either way.
+#[test]
+fn line_regions_offer_every_row_as_its_own_block() {
+    let doc = text_page("BT /F1 24 Tf 72 700 Td (TITLE) Tj ET BT /F1 12 Tf 14 TL 72 676 Td (first line of) Tj T* (the paragraph) Tj T* (tail) Tj ET");
+    let lines = text::text_lines(&doc, 0).unwrap();
+    let by_region = super::text::regions_for_test(&lines, false);
+    let by_row = super::text::regions_for_test(&lines, true);
+    assert!(by_row.len() > by_region.len(), "{} rows, {} regions", by_row.len(), by_region.len());
+    assert_eq!(by_row.len(), 4);
+    assert!(by_row.iter().all(|b| b.rows.len() == 1));
+    assert_eq!(by_row.iter().map(|b| b.text.as_str()).collect::<Vec<_>>()[0], "TITLE");
+    // Every line is in exactly one block in both groupings.
+    for blocks in [&by_region, &by_row] {
+        let mut seen: Vec<usize> = blocks.iter().flat_map(|b| b.lines.iter().copied()).collect();
+        seen.sort_unstable();
+        assert_eq!(seen, (0..lines.len()).collect::<Vec<_>>());
+    }
+    // The default is untouched by the test: regions, not rows.
+    assert!(!super::line_regions());
+}

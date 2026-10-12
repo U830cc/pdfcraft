@@ -2213,6 +2213,8 @@ signature pad	Type	Digita
 @plural	{n} object selected|{n} objects selected	{n} oggetto selezionato|{n} oggetti selezionati
 	Drag the selection to move it. Esc clears the selection.	Trascina la selezione per spostarla. Esc annulla la selezione.
 	Shift-click to select several objects. Drag empty space to select an area.	Fai clic con Maiusc per selezionare più oggetti. Trascina in uno spazio vuoto per selezionare un'area.
+	Edit each line separately	Modifica ogni riga separatamente
+	Each line of text becomes its own box, so one line can be changed without touching the lines around it.	Ogni riga di testo diventa un riquadro a sé, così si può cambiare una riga senza toccare quelle vicine.
 	Select at most 1000 objects at a time.	Seleziona al massimo 1000 oggetti alla volta.
 	Finish or discard the text being edited before selecting several objects.	Completa o annulla la modifica del testo prima di selezionare più oggetti.
 	Move object	Sposta oggetto

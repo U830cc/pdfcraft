@@ -2165,6 +2165,8 @@ action wizard	Start	Старт
 @plural	{n} object selected|{n} objects selected	Избран е {n} обект|Избрани са {n} обекта
 	Drag the selection to move it. Esc clears the selection.	Плъзнете избраното, за да го преместите. Esc премахва избора.
 	Shift-click to select several objects. Drag empty space to select an area.	Щракнете с Shift, за да изберете няколко обекта. Плъзнете в празно място, за да изберете област.
+	Edit each line separately	Редактиране на всеки ред поотделно
+	Each line of text becomes its own box, so one line can be changed without touching the lines around it.	Всеки ред текст получава собствена рамка, така че един ред може да се промени, без да се засягат съседните.
 	Select at most 1000 objects at a time.	Изберете най-много 1000 обекта наведнъж.
 	Finish or discard the text being edited before selecting several objects.	Завършете или отменете редактирането на текста, преди да изберете няколко обекта.
 	Move object	Преместване на обект

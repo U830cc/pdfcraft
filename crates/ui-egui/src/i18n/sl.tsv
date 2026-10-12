@@ -2189,6 +2189,8 @@ signature pad	Type	Vtipkaj
 	Saved {place}: {before} → {after} (not smaller){detail}	Shranjeno {place}: {before} → {after} (ni manjše){detail}
 	Select at most 1000 objects at a time.	Naenkrat lahko izberete največ 1000 objektov.
 	Shift-click to select several objects. Drag empty space to select an area.	S Shift in klikom izberete več objektov. Povlecite po praznem prostoru, da izberete območje.
+	Edit each line separately	Urejanje vsake vrstice posebej
+	Each line of text becomes its own box, so one line can be changed without touching the lines around it.	Vsaka vrstica besedila dobi svoj okvir, tako da lahko spremenite eno vrstico, ne da bi posegli v sosednje.
 	Some bookmarks are not shown here: the panel lists a limited number, nested a limited depth.	Nekateri zaznamki tu niso prikazani: seznam prikaže omejeno število zaznamkov do omejene globine gnezdenja.
 	Switch to List view to change the pages it takes.	Preklopite na pogled seznama, da spremenite strani, ki jih zajame.
 	Text used as a clipping path cannot be moved with this selection.	Besedila, uporabljenega kot pot izrezovanja, s tem izborom ni mogoče premakniti.

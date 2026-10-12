@@ -2165,6 +2165,8 @@ calendar date	December	Желтоқсан
 	Shared Field Properties	Ортақ өріс сипаттары
 	Shift- or Ctrl/Command-click to select several fields.	Бірнеше өрісті таңдау үшін Shift немесе Ctrl/Command басып шертіңіз.
 	Shift-click to select several objects. Drag empty space to select an area.	Бірнеше объектіні таңдау үшін Shift басып шертіңіз. Ауданды таңдау үшін бос орынды сүйреңіз.
+	Edit each line separately	Әр жолды бөлек өңдеу
+	Each line of text becomes its own box, so one line can be changed without touching the lines around it.	Мәтіннің әр жолы өз жақтауына ие болады, сондықтан бір жолды айналасындағы жолдарға тимей өзгертуге болады.
 	Slash	Қиғаш сызық
 	Some bookmarks are not shown here: the panel lists a limited number, nested a limited depth.	Кейбір бетбелгілер осында көрсетілмеген: панель шектеулі санды, шектеулі тереңдікке дейін ғана тізеді.
 	Switch to List view to change the pages it takes.	Қамтитын беттерін өзгерту үшін Тізім көрінісіне ауысыңыз.

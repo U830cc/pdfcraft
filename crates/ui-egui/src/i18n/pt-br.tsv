@@ -2204,6 +2204,8 @@ comment menu	Edit	Editar
 @plural	{n} object selected|{n} objects selected	{n} objeto selecionado|{n} objetos selecionados
 	Drag the selection to move it. Esc clears the selection.	Arraste a seleção para movê-la. Esc limpa a seleção.
 	Shift-click to select several objects. Drag empty space to select an area.	Use Shift e clique para selecionar vários objetos. Arraste em um espaço vazio para selecionar uma área.
+	Edit each line separately	Editar cada linha separadamente
+	Each line of text becomes its own box, so one line can be changed without touching the lines around it.	Cada linha de texto passa a ter sua própria caixa, de modo que é possível alterar uma linha sem mexer nas linhas ao redor.
 	Select at most 1000 objects at a time.	Selecione no máximo 1000 objetos por vez.
 	Finish or discard the text being edited before selecting several objects.	Conclua ou descarte a edição do texto antes de selecionar vários objetos.
 	Move object	Mover objeto

@@ -2083,6 +2083,8 @@
 @plural	{n} field name collides with earlier files and will be renamed: {list}|{n} field names collide with earlier files and will be renamed: {list}	{n} 個欄位名稱與先前的檔案衝突，將被重新命名: {list}
 	Drag the selection to move it. Esc clears the selection.	拖曳選取範圍即可移動。按 Esc 清除選取。
 	Shift-click to select several objects. Drag empty space to select an area.	按住 Shift 點選可選取多個物件。拖曳空白區域可框選。
+	Edit each line separately	逐行個別編輯
+	Each line of text becomes its own box, so one line can be changed without touching the lines around it.	每一行文字都成為獨立的文字方塊，因此可以只修改一行而不影響周圍的行。
 	Select at most 1000 objects at a time.	一次最多選取 1000 個物件。
 	Finish or discard the text being edited before selecting several objects.	請先完成或放棄正在編輯的文字，再選取多個物件。
 	Move object	移動物件

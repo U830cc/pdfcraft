@@ -2222,6 +2222,8 @@ key	Space	Spacja
 @plural	{n} object selected|{n} objects selected	{n} obiekt zaznaczony|{n} obiekty zaznaczone|{n} obiektów zaznaczonych
 	Drag the selection to move it. Esc clears the selection.	Przeciągnij zaznaczenie, aby je przenieść. Esc anuluje zaznaczenie.
 	Shift-click to select several objects. Drag empty space to select an area.	Klikaj z wciśniętym Shift, aby zaznaczyć kilka obiektów. Przeciągnij w pustym miejscu, aby zaznaczyć obszar.
+	Edit each line separately	Edytuj każdy wiersz osobno
+	Each line of text becomes its own box, so one line can be changed without touching the lines around it.	Każdy wiersz tekstu otrzymuje własną ramkę, dzięki czemu można zmienić jeden wiersz bez naruszania sąsiednich.
 	Select at most 1000 objects at a time.	Zaznacz najwyżej 1000 obiektów naraz.
 	Finish or discard the text being edited before selecting several objects.	Zakończ lub odrzuć edycję tekstu przed zaznaczeniem kilku obiektów.
 	Move object	Przenieś obiekt

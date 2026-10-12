@@ -188,6 +188,26 @@ fn tool_detail(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &Tokens, g: &'static
             } else {
                 ui.label(tl!("Shift-click to select several objects. Drag empty space to select an area."));
             }
+            // A heading and the lines under it, or neighbouring one-line paragraphs, are one
+            // region to edit. This offers each line on its own instead.
+            let mut by_line = pdfcraft_engine::line_regions();
+            if ui
+                .add(crate::widgets::checkbox(&mut by_line, tl!("Edit each line separately")))
+                .on_hover_text(tl!("Each line of text becomes its own box, so one line can be changed without touching the lines around it."))
+                .changed()
+            {
+                pdfcraft_engine::set_line_regions(by_line);
+                // Paragraph numbers differ between the two groupings: nothing may stay open or
+                // selected under an old number.
+                for view in &mut app.views {
+                    view.line_editor = None;
+                    view.block_drag = None;
+                    view.text_background = Default::default();
+                    view.objects = Default::default();
+                    // The boxes drawn on each page are kept per edit; this is not an edit.
+                    view.edit_lines.clear();
+                }
+            }
             ui.add_space(6.0);
         }
         format_section(app, ui, t);

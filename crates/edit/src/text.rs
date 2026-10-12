@@ -23,6 +23,7 @@ use crate::EditError;
 #[path = "text_regions.rs"]
 mod regions;
 use regions::{group_blocks, rewrite_styled_block};
+pub use regions::{line_regions, set_line_regions};
 
 /// One line of existing text.
 #[derive(Clone, Debug, PartialEq)]
@@ -1556,6 +1557,13 @@ pub fn reading_blocks(doc: &Document, page: usize) -> Result<Vec<TextBlock>, Edi
     // Ruling lines keep the text of neighbouring table cells in separate blocks.
     let rules = crate::rules::page_rules(doc, page).unwrap_or_default();
     Ok(regions::group_reading_blocks(&lines, &rules))
+}
+
+/// The edit regions of `lines`, by visual region or with every row on its own, whatever
+/// [`set_line_regions`] says (tests share one process, so they don't flip the setting).
+#[cfg(test)]
+pub(crate) fn regions_for_test(lines: &[TextLine], by_row: bool) -> Vec<TextBlock> {
+    regions::group_for_test(lines, by_row)
 }
 
 /// [`reading_blocks`] with the lines its blocks index (`TextBlock::lines`, `TextBlock::style_runs`).

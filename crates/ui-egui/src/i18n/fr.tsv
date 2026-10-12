@@ -2206,6 +2206,8 @@ signature pad	Type	Saisir
 @plural	{n} object selected|{n} objects selected	{n} objet sélectionné|{n} objets sélectionnés
 	Drag the selection to move it. Esc clears the selection.	Faites glisser la sélection pour la déplacer. Échap annule la sélection.
 	Shift-click to select several objects. Drag empty space to select an area.	Maj-clic pour sélectionner plusieurs objets. Faites glisser dans un espace vide pour sélectionner une zone.
+	Edit each line separately	Modifier chaque ligne séparément
+	Each line of text becomes its own box, so one line can be changed without touching the lines around it.	Chaque ligne de texte devient son propre cadre : vous pouvez modifier une ligne sans toucher aux lignes voisines.
 	Select at most 1000 objects at a time.	Sélectionnez au maximum 1000 objets à la fois.
 	Finish or discard the text being edited before selecting several objects.	Terminez ou abandonnez la modification du texte avant de sélectionner plusieurs objets.
 	Move object	Déplacer un objet

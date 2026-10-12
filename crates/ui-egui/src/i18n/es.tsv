@@ -2342,6 +2342,8 @@ action wizard	Start	Iniciar
 @plural	{n} object selected|{n} objects selected	{n} objeto seleccionado|{n} objetos seleccionados
 	Drag the selection to move it. Esc clears the selection.	Arrastra la selección para moverla. Esc borra la selección.
 	Shift-click to select several objects. Drag empty space to select an area.	Pulsa Mayús y haz clic para seleccionar varios objetos. Arrastra en un espacio vacío para seleccionar un área.
+	Edit each line separately	Editar cada línea por separado
+	Each line of text becomes its own box, so one line can be changed without touching the lines around it.	Cada línea de texto pasa a tener su propio cuadro, de modo que se puede cambiar una línea sin tocar las que la rodean.
 	Select at most 1000 objects at a time.	Selecciona como máximo 1000 objetos a la vez.
 	Finish or discard the text being edited before selecting several objects.	Termina o descarta la edición del texto antes de seleccionar varios objetos.
 	Move object	Mover objeto

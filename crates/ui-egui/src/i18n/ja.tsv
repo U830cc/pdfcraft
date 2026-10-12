@@ -2202,6 +2202,8 @@ signature pad	Type	入力
 @plural	{n} object selected|{n} objects selected	{n}個のオブジェクトを選択中
 	Drag the selection to move it. Esc clears the selection.	選択範囲をドラッグして移動します。Escで選択を解除します。
 	Shift-click to select several objects. Drag empty space to select an area.	Shiftを押しながらクリックすると複数のオブジェクトを選択できます。空白をドラッグすると範囲選択できます。
+	Edit each line separately	各行を個別に編集
+	Each line of text becomes its own box, so one line can be changed without touching the lines around it.	テキストの各行が独立したボックスになり、周囲の行に影響を与えずに 1 行だけ変更できます。
 	Select at most 1000 objects at a time.	一度に選択できるオブジェクトは1000個までです。
 	Finish or discard the text being edited before selecting several objects.	複数のオブジェクトを選択する前に、テキストの編集を完了するか破棄してください。
 	Move object	オブジェクトを移動

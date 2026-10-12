@@ -2207,6 +2207,8 @@ action wizard	Start	Starten
 @plural	{n} object selected|{n} objects selected	{n} Objekt ausgewählt|{n} Objekte ausgewählt
 	Drag the selection to move it. Esc clears the selection.	Ziehen Sie die Auswahl, um sie zu verschieben. Esc hebt die Auswahl auf.
 	Shift-click to select several objects. Drag empty space to select an area.	Mit Umschalt-Klick mehrere Objekte auswählen. Ziehen Sie in einem leeren Bereich, um einen Auswahlrahmen aufzuziehen.
+	Edit each line separately	Jede Zeile einzeln bearbeiten
+	Each line of text becomes its own box, so one line can be changed without touching the lines around it.	Jede Textzeile erhält einen eigenen Rahmen, sodass eine Zeile geändert werden kann, ohne die Zeilen darum herum zu verändern.
 	Select at most 1000 objects at a time.	Wählen Sie höchstens 1000 Objekte gleichzeitig aus.
 	Finish or discard the text being edited before selecting several objects.	Schließen Sie die Textbearbeitung ab oder verwerfen Sie sie, bevor Sie mehrere Objekte auswählen.
 	Move object	Objekt verschieben

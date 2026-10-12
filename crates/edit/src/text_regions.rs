@@ -61,8 +61,31 @@ fn row_rect(row: &[usize], lines: &[TextLine]) -> Option<[f64; 4]> {
     row.iter().filter_map(|i| lines.get(*i)).map(|l| l.rect).reduce(union)
 }
 
+/// Whether Edit text offers every visual row as a region of its own ([`set_line_regions`]).
+static LINE_REGIONS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Choose how Edit text groups a page's text. Off (the default), aligned rows form one visual
+/// region: a heading with the lines under it, or neighbouring one-line paragraphs, are edited
+/// together. On, every visual row is a region of its own, so one of them can be changed without
+/// rewriting the others. The choice applies to every document of the process; block indexes
+/// (`text_blocks`, `rewrite_block`, …) differ between the two, so change it only while no
+/// paragraph is open for editing.
+pub fn set_line_regions(on: bool) {
+    LINE_REGIONS.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The current choice of [`set_line_regions`].
+pub fn line_regions() -> bool {
+    LINE_REGIONS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(test)]
+pub(super) fn group_for_test(lines: &[TextLine], by_row: bool) -> Vec<TextBlock> {
+    group_layout_as(lines, true, &[], by_row)
+}
+
 pub(super) fn group_blocks(lines: &[TextLine]) -> Vec<TextBlock> {
-    group_layout(lines, true, &[])
+    group_layout_as(lines, true, &[], line_regions())
 }
 
 /// Whether a vertical ruling line stands between `a` and the text `b` to its right.
@@ -112,6 +135,11 @@ fn same_style(a: &TextLine, b: &TextLine) -> bool {
 }
 
 fn group_layout(lines: &[TextLine], mixed: bool, rules: &[[f64; 4]]) -> Vec<TextBlock> {
+    group_layout_as(lines, mixed, rules, false)
+}
+
+/// [`group_layout`]; with `by_row`, no row joins the block above it.
+fn group_layout_as(lines: &[TextLine], mixed: bool, rules: &[[f64; 4]], by_row: bool) -> Vec<TextBlock> {
     let mut rows: Vec<Vec<usize>> = Vec::new();
     for (i, line) in lines.iter().enumerate() {
         let joins = rows.last().and_then(|r| r.last()).and_then(|i| lines.get(*i)).is_some_and(|prev| {
@@ -144,40 +172,42 @@ fn group_layout(lines: &[TextLine], mixed: bool, rules: &[[f64; 4]]) -> Vec<Text
     for row in rows {
         let Some(first) = row.first().and_then(|i| lines.get(*i)) else { continue };
         let Some(rect) = row_rect(&row, lines) else { continue };
-        let joins = blocks.last().is_some_and(|block| {
-            let Some(prev_row) = block.rows.last() else { return false };
-            let Some(prev) = prev_row.first().and_then(|i| lines.get(*i)) else { return false };
-            let Some(pr) = row_rect(prev_row, lines) else { return false };
-            let gap = prev.origin.baseline - first.origin.baseline;
-            // A block's rows share one leading. A clearly wider gap after two or more rows is
-            // paragraph spacing: the next paragraph starts its own block.
-            let leading = block
-                .rows
-                .len()
-                .checked_sub(2)
-                .and_then(|i| block.rows.get(i))
-                .and_then(|r| r.first())
-                .and_then(|i| lines.get(*i))
-                .map(|l| l.origin.baseline - prev.origin.baseline);
-            if leading.is_some_and(|l| l > 0.0 && gap > l * 1.25 + 0.5) {
-                return false;
-            }
-            let tol = prev.size.max(first.size).max(1.0);
-            let aligned = (pr[0] - rect[0]).abs() < tol || ((pr[0] + pr[2] - rect[0] - rect[2]) / 2.0).abs() < tol || (pr[2] - rect[2]).abs() < tol;
-            // A row of several styles (a bold word in a sentence) is body text: it continues the
-            // paragraph above, and the paragraph continues under it, at the same size.
-            let several = |r: &[usize]| {
-                r.first().and_then(|i| lines.get(*i)).is_some_and(|a| r.iter().filter_map(|i| lines.get(*i)).any(|b| !same_style(a, b)))
-            };
-            let continues = !mixed && (prev.size - first.size).abs() < 0.01 && (several(prev_row) || several(&row));
-            (mixed || same_style(prev, first) || continues)
-                && (same_plane(prev, first) || continues && same_direction(prev, first))
-                && !ruled_below(rules, pr, rect)
-                && aligned
-                && first.size.min(prev.size) >= first.size.max(prev.size) * 0.4
-                && gap > first.size.min(prev.size) * 0.8
-                && gap < first.size.max(prev.size) * 2.5
-        });
+        let joins = !by_row
+            && blocks.last().is_some_and(|block| {
+                let Some(prev_row) = block.rows.last() else { return false };
+                let Some(prev) = prev_row.first().and_then(|i| lines.get(*i)) else { return false };
+                let Some(pr) = row_rect(prev_row, lines) else { return false };
+                let gap = prev.origin.baseline - first.origin.baseline;
+                // A block's rows share one leading. A clearly wider gap after two or more rows is
+                // paragraph spacing: the next paragraph starts its own block.
+                let leading = block
+                    .rows
+                    .len()
+                    .checked_sub(2)
+                    .and_then(|i| block.rows.get(i))
+                    .and_then(|r| r.first())
+                    .and_then(|i| lines.get(*i))
+                    .map(|l| l.origin.baseline - prev.origin.baseline);
+                if leading.is_some_and(|l| l > 0.0 && gap > l * 1.25 + 0.5) {
+                    return false;
+                }
+                let tol = prev.size.max(first.size).max(1.0);
+                let aligned =
+                    (pr[0] - rect[0]).abs() < tol || ((pr[0] + pr[2] - rect[0] - rect[2]) / 2.0).abs() < tol || (pr[2] - rect[2]).abs() < tol;
+                // A row of several styles (a bold word in a sentence) is body text: it continues the
+                // paragraph above, and the paragraph continues under it, at the same size.
+                let several = |r: &[usize]| {
+                    r.first().and_then(|i| lines.get(*i)).is_some_and(|a| r.iter().filter_map(|i| lines.get(*i)).any(|b| !same_style(a, b)))
+                };
+                let continues = !mixed && (prev.size - first.size).abs() < 0.01 && (several(prev_row) || several(&row));
+                (mixed || same_style(prev, first) || continues)
+                    && (same_plane(prev, first) || continues && same_direction(prev, first))
+                    && !ruled_below(rules, pr, rect)
+                    && aligned
+                    && first.size.min(prev.size) >= first.size.max(prev.size) * 0.4
+                    && gap > first.size.min(prev.size) * 0.8
+                    && gap < first.size.max(prev.size) * 2.5
+            });
         if !joins {
             blocks.push(TextBlock {
                 text: String::new(),

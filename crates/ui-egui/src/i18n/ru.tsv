@@ -2119,6 +2119,8 @@
 @plural	{n} object selected|{n} objects selected	Выделен {n} объект|Выделено {n} объекта|Выделено {n} объектов
 	Drag the selection to move it. Esc clears the selection.	Перетащите выделение, чтобы переместить его. Esc снимает выделение.
 	Shift-click to select several objects. Drag empty space to select an area.	Щёлкните с Shift, чтобы выбрать несколько объектов. Протяните рамку на пустом месте, чтобы выделить область.
+	Edit each line separately	Редактировать каждую строку отдельно
+	Each line of text becomes its own box, so one line can be changed without touching the lines around it.	Каждая строка текста получает собственную рамку, поэтому одну строку можно изменить, не затрагивая соседние.
 	Select at most 1000 objects at a time.	Выбирайте не более 1000 объектов одновременно.
 	Finish or discard the text being edited before selecting several objects.	Завершите или отмените редактирование текста, прежде чем выбирать несколько объектов.
 	Move object	Переместить объект
