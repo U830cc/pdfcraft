@@ -421,6 +421,17 @@ pub fn mode_bar(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                     app.left_open = false;
                 }
                 ui.data_mut(|d| d.insert_temp(shown, has_doc));
+                // The same when a tool that works on the page is picked from the panel (Edit text,
+                // Add text, a stamp, a form field): the panel has done its job and the page is
+                // what the tool needs. The panel button in this bar brings it back.
+                let picked = egui::Id::new("tool-picked-on-a-narrow-window");
+                let tool = format!("{:?}", app.quick_tool);
+                let before: Option<String> = ui.data(|d| d.get_temp(picked));
+                let on_page = !matches!(app.quick_tool, crate::QuickTool::Select | crate::QuickTool::Hand);
+                if on_page && before.as_ref().is_some_and(|b| *b != tool) && ui.max_rect().width() < COMPACT_WIDTH {
+                    app.left_open = false;
+                }
+                ui.data_mut(|d| d.insert_temp(picked, tool));
                 let modes = |app: &mut PdfCraftApp, ui: &mut egui::Ui| {
                     for (mode, label) in [
                         (Mode::AllTools, "All tools"),
