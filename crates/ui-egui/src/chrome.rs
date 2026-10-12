@@ -400,10 +400,14 @@ pub fn mode_bar(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
         .show(ui, |ui| {
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
-                main_menu(app, ui);
-                ui.add_space(6.0);
-                ui.painter().vline(ui.cursor().left(), ui.max_rect().y_range().shrink(12.0), Stroke::new(1.0, t.divider));
-                ui.add_space(10.0);
+                // A phone-width bar keeps the menu's icon and gives its label's room to the tabs.
+                let compact = ui.max_rect().width() < COMPACT_WIDTH;
+                main_menu(app, ui, compact);
+                if !compact {
+                    ui.add_space(6.0);
+                    ui.painter().vline(ui.cursor().left(), ui.max_rect().y_range().shrink(12.0), Stroke::new(1.0, t.divider));
+                    ui.add_space(10.0);
+                }
                 // On a narrow window (a phone, a split screen) the search box becomes its icon and
                 // the mode tabs scroll sideways in the room left of the buttons, so nothing is
                 // drawn over anything else.
@@ -473,9 +477,9 @@ pub fn mode_bar(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
         });
 }
 
-fn main_menu(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
+fn main_menu(app: &mut PdfCraftApp, ui: &mut egui::Ui, compact: bool) {
     let t = Tokens::get(ui.ctx());
-    let resp = widgets::ghost_button(ui, "panel-left", tl!("Menu"));
+    let resp = if compact { icons::button(ui, "panel-left", 32.0, false, tl!("Menu")) } else { widgets::ghost_button(ui, "panel-left", tl!("Menu")) };
     egui::Popup::menu(&resp).show(|ui| {
         ui.set_min_width(230.0);
         ui.menu_button(tl!("File"), |ui| crate::commands::registry_menu(app, ui, "File"));
