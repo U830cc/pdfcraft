@@ -821,13 +821,23 @@ fn editor_job(ui: &egui::Ui, ed: &LineEditor, text: &str, scale: f32, width: f32
             }
             let mut font = editor_font(&look, (look.size as f32 * scale).clamp(1.0, 300.0));
             let original_face = ed.look.family == ed.look0.family && ed.look.bold == ed.look0.bold && ed.look.italic == ed.look0.italic;
-            let embedded = original_face && ed.fonts.contains_key(&line.font);
+            // A source subset shows Thai (and other shaped text) only through glyphs its own
+            // tables position, which the subset rarely keeps: its marks would vanish while
+            // typing. Such text is laid out in the interface's face for the script instead, and
+            // without letter spacing, which would pull marks off their letters.
+            let shaped = pdfcraft_fonts::source_shaping::required(&line.text)
+                || pdfcraft_fonts::source_shaping::required(text.get(range.clone()).unwrap_or_default());
+            let embedded = original_face && !shaped && ed.fonts.contains_key(&line.font);
             if embedded && let Some(name) = ed.fonts.get(&line.font) {
                 font.family = FontFamily::Name(name.clone().into());
             }
             let native_width = ui.fonts_mut(|f| f.layout_no_wrap(line.text.clone(), font.clone(), Color32::BLACK).size().x);
             let target_width = ((line.rect[2] - line.rect[0]) * look.size / line.size.max(0.01)) as f32 * scale;
-            let spacing = if original_face { (target_width - native_width) / line.text.chars().count().saturating_sub(1).max(1) as f32 } else { 0.0 };
+            let spacing = if original_face && !shaped {
+                (target_width - native_width) / line.text.chars().count().saturating_sub(1).max(1) as f32
+            } else {
+                0.0
+            };
             job.append(
                 text.get(range).unwrap_or_default(),
                 0.0,
