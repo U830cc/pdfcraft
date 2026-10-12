@@ -38,6 +38,8 @@ pub fn tab_strip(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
         .frame(egui::Frame::NONE.fill(t.titlebar).inner_margin(egui::Margin { left, right: 10, top: 0, bottom: 0 }))
         .show(ui, |ui| {
             let full = ui.max_rect();
+            // A phone-width strip has no room for the community button beside Open.
+            let compact = full.width() < COMPACT_WIDTH;
             let drag = ui.interact(full, ui.id().with("titledrag"), Sense::click_and_drag());
             if drag.drag_started() {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
@@ -53,7 +55,11 @@ pub fn tab_strip(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                     app.combine_tab.focused = false;
                 }
                 // Keep the two icon buttons, Discord's text/padding and three gaps outside the scrolling tabs.
-                let controls_width = ui.fonts_mut(|f| f.layout_no_wrap("Discord".into(), theme::medium(13.0), t.text).size().x) + 2.0 * button + 50.0;
+                let controls_width = if compact {
+                    2.0 * button + 16.0
+                } else {
+                    ui.fonts_mut(|f| f.layout_no_wrap("Discord".into(), theme::medium(13.0), t.text).size().x) + 2.0 * button + 50.0
+                };
                 // Open stays in sight after the tabs: its icon, text and padding, and the gaps around it.
                 let open_width = ui.fonts_mut(|f| f.layout_no_wrap(tl!("Open").into(), theme::medium(13.0), t.text).size().x) + 38.0 + 12.0;
                 let mut tabs_width = (ui.available_width() - controls_width - open_width).max(0.0);
@@ -214,7 +220,11 @@ pub fn tab_strip(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                         app.dialog = Some(Dialog::Shortcuts);
                     }
                     // One click to the community, from anywhere in the app.
-                    if widgets::ghost_button_sized(ui, "messages-square", "Discord", tab_h).on_hover_text(pdfcraft_engine::links::DISCORD).clicked() {
+                    if !compact
+                        && widgets::ghost_button_sized(ui, "messages-square", "Discord", tab_h)
+                            .on_hover_text(pdfcraft_engine::links::DISCORD)
+                            .clicked()
+                    {
                         app.execute("help.discord");
                     }
                 });
@@ -377,6 +387,11 @@ fn tab(
     })
 }
 
+/// Below this window width (points) the mode bar is laid out for a narrow screen.
+const NARROW_WIDTH: f32 = 820.0;
+/// Below this width the tab strip drops what it can do without.
+const COMPACT_WIDTH: f32 = 560.0;
+
 pub fn mode_bar(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
     egui::Panel::top("mode_bar")
@@ -389,12 +404,42 @@ pub fn mode_bar(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                 ui.add_space(6.0);
                 ui.painter().vline(ui.cursor().left(), ui.max_rect().y_range().shrink(12.0), Stroke::new(1.0, t.divider));
                 ui.add_space(10.0);
-                for (mode, label) in
-                    [(Mode::AllTools, "All tools"), (Mode::Read, "Read"), (Mode::Edit, "Edit"), (Mode::Convert, "Convert"), (Mode::Sign, "E-Sign")]
-                {
-                    if widgets::mode_tab(ui, tl!(label), app.mode == mode).clicked() {
-                        app.switch_mode(mode, true);
+                // On a narrow window (a phone, a split screen) the search box becomes its icon and
+                // the mode tabs scroll sideways in the room left of the buttons, so nothing is
+                // drawn over anything else.
+                let narrow = ui.max_rect().width() < NARROW_WIDTH;
+                // On a phone-width window the tools panel would leave a sliver for the page: when
+                // a document comes up there, the panel steps aside once (Menu and the mode tabs
+                // bring it back, and it stays wherever the user puts it after that).
+                let shown = egui::Id::new("document-shown-on-a-narrow-window");
+                let (has_doc, had_doc) = (app.active.is_some(), ui.data(|d| d.get_temp::<bool>(shown)).unwrap_or(false));
+                if has_doc && !had_doc && ui.max_rect().width() < COMPACT_WIDTH {
+                    app.left_open = false;
+                }
+                ui.data_mut(|d| d.insert_temp(shown, has_doc));
+                let modes = |app: &mut PdfCraftApp, ui: &mut egui::Ui| {
+                    for (mode, label) in [
+                        (Mode::AllTools, "All tools"),
+                        (Mode::Read, "Read"),
+                        (Mode::Edit, "Edit"),
+                        (Mode::Convert, "Convert"),
+                        (Mode::Sign, "E-Sign"),
+                    ] {
+                        if widgets::mode_tab(ui, tl!(label), app.mode == mode).clicked() {
+                            app.switch_mode(mode, true);
+                        }
                     }
+                };
+                if narrow {
+                    // Print, Save, Properties and Search, 32 points each with their gaps.
+                    let buttons = 4.0 * 36.0 + 12.0;
+                    egui::ScrollArea::horizontal()
+                        .id_salt("mode-tabs")
+                        .max_width((ui.available_width() - buttons).max(48.0))
+                        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                        .show(ui, |ui| ui.horizontal_centered(|ui| modes(app, ui)));
+                } else {
+                    modes(app, ui);
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
@@ -413,9 +458,15 @@ pub fn mode_bar(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                             app.dialog = Some(Dialog::Properties(PropsTab::Description));
                         }
                     });
-                    ui.add_space(8.0);
-                    if widgets::search_box(ui, tl!("Find tools and commands"), 260.0).clicked() {
-                        app.palette_open = true;
+                    if narrow {
+                        if icons::button(ui, "search", 32.0, false, tl!("Find tools and commands")).clicked() {
+                            app.palette_open = true;
+                        }
+                    } else {
+                        ui.add_space(8.0);
+                        if widgets::search_box(ui, tl!("Find tools and commands"), 260.0).clicked() {
+                            app.palette_open = true;
+                        }
                     }
                 });
             });
