@@ -1610,7 +1610,63 @@ pub struct RangeStyle {
 
 /// Rewrite paragraph `block` with new text (or its own) and formatting, rewrapped to its width.
 pub fn rewrite_block(doc: &mut Document, page: usize, block: usize, text: Option<&str>, style: &BlockStyle) -> Result<LineEdit, EditError> {
-    rewrite_block_with_limit(doc, page, block, text, style, MAX_TYPE3_GLYPHS)
+    let before = text_blocks(doc, page).ok().and_then(|blocks| blocks.get(block).map(|b| (b.rect, b.size)));
+    let edit = rewrite_block_with_limit(doc, page, block, text, style, MAX_TYPE3_GLYPHS)?;
+    if let Some((rect, size)) = before {
+        make_room_below(doc, page, rect, size);
+    }
+    Ok(edit)
+}
+
+/// After a paragraph that occupied `old` grew downwards, move the text and images under it down
+/// far enough that the new lines don't print over them.
+///
+/// Only when it is safe: nothing is moved if the page paints lines, boxes or other paths under
+/// the paragraph (a table's rules can't follow its text), if anything would leave the page, or
+/// if the move is refused. The paragraph then overlaps what follows, as before.
+fn make_room_below(doc: &mut Document, page: usize, old: [f64; 4], size: f64) {
+    let Ok(blocks) = text_blocks(doc, page) else { return };
+    // The rewritten paragraph: the block that starts where the old one did.
+    let tol = size.max(1.0);
+    let Some(now) = blocks.iter().map(|b| b.rect).find(|r| (r[3] - old[3]).abs() < tol && (r[0] - old[0]).abs() < tol) else { return };
+    let extra = old[1] - now[1];
+    if !extra.is_finite() || extra < size * 0.5 || extra > 14_400.0 {
+        return;
+    }
+    let across = |r: [f64; 4]| r[0] < old[2].max(now[2]) && r[2] > old[0].min(now[0]);
+    match crate::rules::page_paths(doc, page) {
+        Ok(Some(paths)) if !paths.iter().any(|r| r[1] < old[1] && across(*r)) => {}
+        _ => return,
+    }
+    let Ok(objects) = crate::objects::editable_objects(doc, page) else { return };
+    // What starts under the old paragraph, in its columns.
+    let below: Vec<_> = objects.iter().filter(|o| o.rect[3] <= old[1] + tol * 0.25 && across(o.rect)).collect();
+    // The lower edge of the page (its MediaBox, whichever way its corners are given).
+    // Move only as far as the new lines intrude: what follows keeps its gap to the paragraph, up
+    // to one line of it (content further away has room already and stays where it is).
+    let Some(nearest) = below.iter().map(|o| o.rect[3]).reduce(f64::max) else { return };
+    let gap = (old[1] - nearest).clamp(0.0, size.max(1.0));
+    let extra = gap - (now[1] - nearest);
+    if extra < 0.5 {
+        return;
+    }
+    let floor = page_dict(doc, page)
+        .ok()
+        .and_then(|p| {
+            p.dict
+                .get(b"MediaBox")
+                .map(|b| doc.resolve(b))
+                .and_then(|b| b.as_array().map(|a| a.iter().filter_map(Object::as_f64).collect::<Vec<_>>()))
+        })
+        .and_then(|b| Some(b.get(1)?.min(*b.get(3)?)))
+        .filter(|y| y.is_finite())
+        .unwrap_or(0.0);
+    if below.is_empty() || below.len() > crate::objects::MAX_MOVE_OBJECTS || below.iter().any(|o| o.rect[1] - extra < floor) {
+        return;
+    }
+    let targets: Vec<_> = below.iter().map(|o| o.target).collect();
+    // A refusal leaves the document as the edit made it.
+    let _ = crate::objects::move_objects(doc, page, &targets, [0.0, -extra]);
 }
 
 /// [`rewrite_block`] with the most unique characters one generated font may hold (tests lower it).

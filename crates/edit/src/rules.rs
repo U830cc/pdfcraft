@@ -38,6 +38,78 @@ pub fn page_rules(doc: &Document, page: usize) -> Result<Vec<[f64; 4]>, EditErro
     Ok(rules(&parse(&data).ops))
 }
 
+/// The boxes of everything the page's own content paints as paths (lines, boxes, curves, filled
+/// panels), in user space. `None` when there are too many to list: the page is then a drawing.
+pub(crate) fn page_paths(doc: &Document, page: usize) -> Result<Option<Vec<[f64; 4]>>, EditError> {
+    let p = pdfcraft_model::pages(doc).into_iter().nth(page).ok_or(EditError::NoSuchPage(page))?;
+    let list: Vec<Object> = match p.dict.get(b"Contents") {
+        None => Vec::new(),
+        Some(c) => match &*doc.resolve(c) {
+            Object::Array(a) => a.clone(),
+            _ => vec![c.clone()],
+        },
+    };
+    let mut data = Vec::new();
+    for o in list {
+        if let Object::Stream(s) = &*doc.resolve(&o) {
+            data.extend(s.decoded().unwrap_or_default());
+            data.push(b'\n');
+        }
+    }
+    Ok(paths(&parse(&data).ops))
+}
+
+fn paths(ops: &[Op]) -> Option<Vec<[f64; 4]>> {
+    let mut out: Vec<[f64; 4]> = Vec::new();
+    let mut ctm = Matrix::IDENTITY;
+    let mut stack: Vec<Matrix> = Vec::new();
+    let mut current: Option<[f64; 4]> = None;
+    let grow = |current: &mut Option<[f64; 4]>, (x, y): (f64, f64)| {
+        *current = Some(current.map_or([x, y, x, y], |b| [b[0].min(x), b[1].min(y), b[2].max(x), b[3].max(y)]));
+    };
+    for op in ops {
+        match op.op.as_slice() {
+            b"q" => {
+                if stack.len() < 256 {
+                    stack.push(ctm);
+                }
+            }
+            b"Q" => ctm = stack.pop().unwrap_or(ctm),
+            b"cm" => {
+                if let Some(m) = Matrix::from_operands(&op.operands) {
+                    ctm = m.then(&ctm);
+                }
+            }
+            b"re" => {
+                if let Some([x, y, w, h]) = op.nums::<4>() {
+                    grow(&mut current, ctm.apply(x, y));
+                    grow(&mut current, ctm.apply(x + w, y + h));
+                }
+            }
+            b"m" | b"l" | b"c" | b"v" | b"y" => {
+                for pair in op.operands.chunks(2) {
+                    if let [x, y] = pair
+                        && let (Some(x), Some(y)) = (x.as_f64(), y.as_f64())
+                    {
+                        grow(&mut current, ctm.apply(x, y));
+                    }
+                }
+            }
+            b"f" | b"F" | b"f*" | b"S" | b"s" | b"B" | b"B*" | b"b" | b"b*" | b"sh" => {
+                if let Some(b) = current.take().filter(|b| b.iter().all(|v| v.is_finite())) {
+                    out.push(b);
+                }
+                if out.len() > MAX_RULES {
+                    return None;
+                }
+            }
+            b"n" => current = None,
+            _ => {}
+        }
+    }
+    Some(out)
+}
+
 fn rules(ops: &[Op]) -> Vec<[f64; 4]> {
     let mut out: Vec<[f64; 4]> = Vec::new();
     let mut ctm = Matrix::IDENTITY;
@@ -172,11 +244,19 @@ mod tests {
     }
 
     #[test]
+    fn painted_paths_report_their_boxes_and_clips_do_not() {
+        let p = paths(&parse(b"0 0 612 792 re W n 2 0 0 2 10 10 cm 5 5 20 10 re f 0 0 m 50 0 60 40 30 30 c S 1 1 m 2 2 l n").ops).unwrap();
+        assert_eq!(p, [[20.0, 20.0, 60.0, 40.0], [10.0, 10.0, 130.0, 90.0]]);
+        assert!(paths(&parse(b"Q cm re f (x) m S").ops).unwrap().is_empty());
+    }
+
+    #[test]
     fn a_page_of_thousands_of_lines_is_a_drawing() {
         let mut content = Vec::new();
         for i in 0..5000 {
             content.extend(format!("0 {i} 100 0.5 re f\n").bytes());
         }
         assert!(rules(&parse(&content).ops).is_empty());
+        assert!(paths(&parse(&content).ops).is_none());
     }
 }
