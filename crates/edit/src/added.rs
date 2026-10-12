@@ -261,8 +261,9 @@ fn wrapped(t: &AddedText) -> Vec<(String, bool)> {
     out
 }
 
-/// Thai wrapping at shaped cluster boundaries never detaches a tone/vowel mark from its base.
-/// This is glyph-safe wrapping, not dictionary-based Thai word segmentation.
+/// Thai wraps between words (found by the language model in `pdfcraft_fonts::thai_break`, since
+/// Thai has no spaces between them) and never detaches a tone or vowel mark from its base. A
+/// word wider than the box wraps between its shaped clusters.
 fn thai_lines(t: &AddedText, para: &str, width: f64) -> Result<Vec<String>, EditError> {
     let (pieces, _) = shaped_layout(t, para, false)?;
     let mut atoms = Vec::new();
@@ -276,15 +277,47 @@ fn thai_lines(t: &AddedText, para: &str, width: f64) -> Result<Vec<String>, Edit
             })),
         }
     }
+    // Byte offsets in the laid-out text where a line may end.
+    let joined: String = atoms.iter().map(|(text, _)| text.as_str()).collect();
+    let mut breaks = std::collections::HashSet::new();
+    let mut at = 0usize;
+    for piece in pdfcraft_fonts::thai_break::wrap_pieces(&joined) {
+        at = at.saturating_add(piece.len());
+        breaks.insert(at);
+    }
+    // Words: the atoms up to each allowed break, with the width that must fit (spaces ending a
+    // line hang past the edge).
+    let mut words: Vec<(Vec<(String, f64)>, f64)> = vec![(Vec::new(), 0.0)];
+    let mut at = 0usize;
+    for (text, advance) in atoms {
+        at = at.saturating_add(text.len());
+        let blank = text.chars().all(char::is_whitespace);
+        if let Some((word, fit)) = words.last_mut() {
+            if !blank {
+                *fit = word.iter().map(|(_, w)| *w).sum::<f64>() + advance;
+            }
+            word.push((text, advance));
+        }
+        if breaks.contains(&at) {
+            words.push((Vec::new(), 0.0));
+        }
+    }
     let mut lines = Vec::new();
     let (mut line, mut used) = (String::new(), 0.0);
-    for (text, advance) in atoms {
-        if !line.is_empty() && used + advance > width {
-            lines.push(std::mem::take(&mut line));
+    for (word, fit) in words {
+        if !line.is_empty() && used + fit > width {
+            lines.push(std::mem::take(&mut line).trim_end().to_string());
             used = 0.0;
         }
-        line.push_str(&text);
-        used += advance;
+        for (text, advance) in word {
+            // Only a word that is alone on its line and still too wide gets here over the edge.
+            if !line.is_empty() && used + advance > width && !text.chars().all(char::is_whitespace) {
+                lines.push(std::mem::take(&mut line).trim_end().to_string());
+                used = 0.0;
+            }
+            line.push_str(&text);
+            used += advance;
+        }
     }
     lines.push(line);
     Ok(lines)

@@ -49,6 +49,9 @@ pub struct Page {
     pub height: f64,
     pub blocks: Vec<Block>,
     pub images: Vec<Image>,
+    /// Ruling lines as rectangles `[x0, y0, x1, y1]` on the displayed page (points, y up).
+    /// A grid of them is a table whatever its text alignment.
+    pub rules: Vec<[f64; 4]>,
 }
 
 /// One cell of a detected table. `span` is how many grid columns the cell covers (a header
@@ -71,6 +74,8 @@ pub struct Table {
     pub rect: [f64; 4],
     pub cols: Vec<f64>,
     pub rows: Vec<Vec<Cell>>,
+    /// Drawn with ruling lines on the page: the writers give it borders.
+    pub ruled: bool,
 }
 
 /// What goes into the output, in order.
@@ -248,7 +253,7 @@ pub(crate) fn tables(blocks: &[Block]) -> (Vec<Table>, Vec<bool>) {
             right,
             used.iter().map(|&i| blocks[i].rect[3]).fold(f64::MIN, f64::max),
         ];
-        out.push(Table { rect, cols: edges, rows: rows_out });
+        out.push(Table { rect, cols: edges, rows: rows_out, ruled: false });
     };
     // Runs of consecutive multi-column rows are tables. Rows on either side of a run that
     // hold a single cell wide enough to span two columns (a header band, a totals row) join
@@ -297,6 +302,155 @@ pub(crate) fn tables(blocks: &[Block]) -> (Vec<Table>, Vec<bool>) {
     (out, consumed)
 }
 
+/// How far two rule positions may differ (points) and still be the same grid line.
+const RULE_TOL: f64 = 2.0;
+/// More ruling lines than this are not searched for grids (the search is quadratic).
+const MAX_GRID_RULES: usize = 2000;
+/// More rows than this isn't materialized as one table.
+const MAX_ROWS: usize = 2000;
+
+/// Positions clustered within [`RULE_TOL`], ascending.
+fn grid_lines(mut v: Vec<f64>) -> Vec<f64> {
+    v.sort_by(|a, b| a.total_cmp(b));
+    let mut out: Vec<f64> = Vec::new();
+    for x in v {
+        match out.last() {
+            Some(last) if x - *last <= RULE_TOL => {}
+            _ => out.push(x),
+        }
+    }
+    out
+}
+
+/// Tables drawn with ruling lines: each connected set of crossing horizontal and vertical rules
+/// is a grid, and the blocks inside each of its boxes are a cell. A box whose side has no rule
+/// is merged with its neighbour to the right (a spanning cell). Returns the tables and, per
+/// block, whether a table took it.
+fn ruled_tables(blocks: &[Block], rules: &[[f64; 4]]) -> (Vec<Table>, Vec<bool>) {
+    let mut consumed = vec![false; blocks.len()];
+    let mut out = Vec::new();
+    if rules.len() < 4 || rules.len() > MAX_GRID_RULES {
+        return (out, consumed);
+    }
+    let vertical = |r: &[f64; 4]| r[3] - r[1] > r[2] - r[0];
+    let touch = |a: &[f64; 4], b: &[f64; 4]| a[0] <= b[2] + RULE_TOL && b[0] <= a[2] + RULE_TOL && a[1] <= b[3] + RULE_TOL && b[1] <= a[3] + RULE_TOL;
+    // Connected components (rules that touch), by flood fill.
+    let mut group: Vec<Option<usize>> = vec![None; rules.len()];
+    let mut groups = 0usize;
+    for seed in 0..rules.len() {
+        if group.get(seed).copied().flatten().is_some() {
+            continue;
+        }
+        let mut stack = vec![seed];
+        while let Some(i) = stack.pop() {
+            let Some(slot) = group.get_mut(i) else { continue };
+            if slot.is_some() {
+                continue;
+            }
+            *slot = Some(groups);
+            let Some(a) = rules.get(i) else { continue };
+            for (j, b) in rules.iter().enumerate() {
+                if group.get(j).copied().flatten().is_none() && touch(a, b) {
+                    stack.push(j);
+                }
+            }
+        }
+        groups += 1;
+    }
+    for g in 0..groups {
+        let members: Vec<&[f64; 4]> = rules.iter().zip(&group).filter(|(_, m)| **m == Some(g)).map(|(r, _)| r).collect();
+        let xs = grid_lines(members.iter().filter(|r| vertical(r)).map(|r| (r[0] + r[2]) / 2.0).collect());
+        // Top to bottom.
+        let mut ys = grid_lines(members.iter().filter(|r| !vertical(r)).map(|r| (r[1] + r[3]) / 2.0).collect());
+        ys.reverse();
+        let (ncols, nrows) = (xs.len().saturating_sub(1), ys.len().saturating_sub(1));
+        // One box is a frame around text, not a table.
+        if ncols == 0 || nrows == 0 || ncols * nrows < 2 || ncols > MAX_COLS || nrows > MAX_ROWS {
+            continue;
+        }
+        let (Some(&left), Some(&right), Some(&top), Some(&bottom)) = (xs.first(), xs.last(), ys.first(), ys.last()) else { continue };
+        // Each block goes to the box holding its centre.
+        let mut cells: Vec<Vec<usize>> = vec![Vec::new(); ncols * nrows];
+        let mut inside = Vec::new();
+        for (bi, b) in blocks.iter().enumerate() {
+            let (cx, cy) = ((b.rect[0] + b.rect[2]) / 2.0, (b.rect[1] + b.rect[3]) / 2.0);
+            if b.rotation.abs() > 0.5 || cx <= left || cx >= right || cy >= top || cy <= bottom {
+                continue;
+            }
+            let col = xs.partition_point(|x| *x <= cx).saturating_sub(1).min(ncols - 1);
+            let row = ys.partition_point(|y| *y >= cy).saturating_sub(1).min(nrows - 1);
+            if let Some(cell) = cells.get_mut(row * ncols + col) {
+                cell.push(bi);
+                inside.push(bi);
+            }
+        }
+        if inside.is_empty() {
+            continue;
+        }
+        let mut rows = Vec::with_capacity(nrows);
+        for row in 0..nrows {
+            let (Some(&y_top), Some(&y_bottom)) = (ys.get(row), ys.get(row + 1)) else { continue };
+            let mid = (y_top + y_bottom) / 2.0;
+            // Whether a vertical rule separates column `col` from the next one in this row.
+            let divided = |col: usize| {
+                xs.get(col + 1)
+                    .is_some_and(|x| members.iter().any(|r| vertical(r) && ((r[0] + r[2]) / 2.0 - x).abs() <= RULE_TOL && r[1] <= mid && r[3] >= mid))
+            };
+            let mut out_row: Vec<Cell> = Vec::new();
+            let mut col = 0;
+            while col < ncols {
+                let mut span = 1;
+                while col + span < ncols && !divided(col + span - 1) {
+                    span += 1;
+                }
+                let mut members: Vec<usize> = (col..col + span).filter_map(|c| cells.get(row * ncols + c)).flatten().copied().collect();
+                members.sort_by(|a, b| match (blocks.get(*a), blocks.get(*b)) {
+                    (Some(a), Some(b)) => b.rect[3].total_cmp(&a.rect[3]).then(a.rect[0].total_cmp(&b.rect[0])),
+                    _ => std::cmp::Ordering::Equal,
+                });
+                let first = members.first().and_then(|i| blocks.get(*i));
+                let text = members.iter().filter_map(|i| blocks.get(*i)).map(|b| b.text.trim()).collect::<Vec<_>>().join(" ");
+                out_row.push(Cell {
+                    text,
+                    size: first.map_or(11.0, |b| b.size),
+                    bold: first.is_some_and(|b| b.bold),
+                    italic: first.is_some_and(|b| b.italic),
+                    color: first.map_or([0.0; 3], |b| b.color),
+                    span,
+                });
+                col += span;
+            }
+            rows.push(out_row);
+        }
+        for bi in inside {
+            if let Some(c) = consumed.get_mut(bi) {
+                *c = true;
+            }
+        }
+        out.push(Table { rect: [left, bottom, right, top], cols: xs.iter().take(ncols).copied().collect(), rows, ruled: true });
+    }
+    (out, consumed)
+}
+
+/// A page's tables: the ruled ones first, then tables found from the alignment of the text
+/// that is left.
+fn page_tables(page: &Page) -> (Vec<Table>, Vec<bool>) {
+    let (mut found, mut consumed) = ruled_tables(&page.blocks, &page.rules);
+    if found.is_empty() {
+        return tables(&page.blocks);
+    }
+    let rest: Vec<usize> = (0..page.blocks.len()).filter(|i| !consumed.get(*i).copied().unwrap_or(false)).collect();
+    let free: Vec<Block> = rest.iter().filter_map(|i| page.blocks.get(*i)).cloned().collect();
+    let (aligned, taken) = tables(&free);
+    for (i, _) in taken.iter().enumerate().filter(|(_, t)| **t) {
+        if let Some(c) = rest.get(i).and_then(|bi| consumed.get_mut(*bi)) {
+            *c = true;
+        }
+    }
+    found.extend(aligned);
+    (found, consumed)
+}
+
 fn items(pages: &[Page]) -> Vec<Item<'_>> {
     let body = body_size(pages);
     let mut out = Vec::new();
@@ -304,7 +458,7 @@ fn items(pages: &[Page]) -> Vec<Item<'_>> {
         if i > 0 {
             out.push(Item::PageBreak);
         }
-        let (tables, consumed) = tables(&p.blocks);
+        let (tables, consumed) = page_tables(p);
         // Blocks and images by their top edge, top to bottom.
         let mut parts: Vec<(f64, f64, Item)> = p
             .blocks
@@ -320,6 +474,16 @@ fn items(pages: &[Page]) -> Vec<Item<'_>> {
     }
     out
 }
+
+/// Thai letters, vowels, tone marks and digits. Office treats them as complex script: Word sizes
+/// and weights them from the `cs` properties, not the Latin ones, and breaks lines by language.
+pub(crate) fn has_thai(s: &str) -> bool {
+    s.chars().any(|c| matches!(u32::from(c), 0x0E00..=0x0E7F))
+}
+
+/// A face Word, PowerPoint and LibreOffice have for Thai on Windows and macOS. Naming it keeps
+/// the reader from falling back to a face whose tone marks collide with upper vowels.
+pub(crate) const THAI_FACE: &str = "Tahoma";
 
 /// Whether a character may appear in the output. XML 1.0 forbids the C0 controls other than tab,
 /// line feed and carriage return, and U+FFFE/U+FFFF. Text extracted from PDFs often holds them
@@ -358,8 +522,13 @@ fn base64(data: &[u8]) -> String {
 /// One HTML file: headings and paragraphs, tables as real `<table>` elements, images inline, a
 /// rule between pages.
 pub fn html(pages: &[Page], title: &str) -> String {
+    // Thai needs its language (browsers break its lines with a dictionary only when they know
+    // it), a face with Thai glyphs ahead of the generic one, and room for stacked marks.
+    let thai = pages.iter().flat_map(|p| &p.blocks).any(|b| has_thai(&b.text));
+    let (lang, face, leading) =
+        if thai { (" lang=\"th\"", "\"Sarabun\",\"Noto Sans Thai\",\"Leelawadee UI\",Thonburi,Tahoma,", "1.7") } else { ("", "", "1.45") };
     let mut s = format!(
-        "<!DOCTYPE html>\n<html>\n<head>\n<meta charset=\"utf-8\">\n<title>{}</title>\n<style>body{{max-width:46em;margin:2em auto;font-family:sans-serif;line-height:1.45}}\
+        "<!DOCTYPE html>\n<html{lang}>\n<head>\n<meta charset=\"utf-8\">\n<title>{}</title>\n<style>body{{max-width:46em;margin:2em auto;font-family:{face}sans-serif;line-height:{leading}}}\
 img{{max-width:100%}}hr{{border:0;border-top:1px solid #ccc;margin:2em 0}}\
 table{{border-collapse:collapse;margin:1em 0}}td,th{{border:1px solid #999;padding:2px 6px;vertical-align:top}}</style>\n</head>\n<body>\n",
         esc(title)
@@ -425,18 +594,28 @@ pub(crate) fn hex(c: [f64; 3]) -> Option<String> {
 
 /// A formatted text run (shared by paragraphs and table cells).
 fn run_xml(text: &str, size: f64, bold: bool, italic: bool, color: [f64; 3]) -> String {
+    let thai = has_thai(text);
+    // CT_RPr is a sequence: rFonts, b, bCs, i, iCs, color, sz, szCs, lang.
     let mut rpr = String::new();
+    if thai {
+        rpr.push_str(&format!("<w:rFonts w:cs=\"{THAI_FACE}\"/>"));
+    }
+    // Complex-script text (Thai, Arabic, Hebrew) takes its weight, slant and size from the
+    // `Cs` twins; without them Word shows it regular at the default size.
     if bold {
-        rpr.push_str("<w:b/>");
+        rpr.push_str("<w:b/><w:bCs/>");
     }
     if italic {
-        rpr.push_str("<w:i/>");
+        rpr.push_str("<w:i/><w:iCs/>");
     }
     if let Some(h) = hex(color) {
         rpr.push_str(&format!("<w:color w:val=\"{h}\"/>"));
     }
     let half_points = if size.is_finite() { (size * 2.0).round().clamp(2.0, 3276.0) as i64 } else { 24 };
-    rpr.push_str(&format!("<w:sz w:val=\"{half_points}\"/>"));
+    rpr.push_str(&format!("<w:sz w:val=\"{half_points}\"/><w:szCs w:val=\"{half_points}\"/>"));
+    if thai {
+        rpr.push_str("<w:lang w:bidi=\"th-TH\"/>");
+    }
     format!("<w:r><w:rPr>{rpr}</w:rPr><w:t xml:space=\"preserve\">{}</w:t></w:r>", esc(text))
 }
 
@@ -447,8 +626,10 @@ fn docx_table(t: &Table) -> String {
     edges.push(t.rect[2]);
     let widths: Vec<i64> = edges.windows(2).map(|w| ((w[1] - w[0]).max(20.0) * 20.0).round().clamp(60.0, 31680.0) as i64).collect();
     let mut s = String::from("<w:tbl><w:tblPr><w:tblW w:w=\"0\" w:type=\"auto\"/><w:tblBorders>");
+    // A table ruled on the page keeps its lines; alignment alone doesn't prove any.
+    let border = if t.ruled { "w:val=\"single\" w:sz=\"4\" w:space=\"0\" w:color=\"auto\"" } else { "w:val=\"nil\"" };
     for edge in ["top", "left", "bottom", "right", "insideH", "insideV"] {
-        s.push_str(&format!("<w:{edge} w:val=\"nil\"/>"));
+        s.push_str(&format!("<w:{edge} {border}/>"));
     }
     s.push_str("</w:tblBorders></w:tblPr><w:tblGrid>");
     for w in &widths {
@@ -744,7 +925,24 @@ pub fn rtf(pages: &[Page]) -> String {
         let c = rgb8(c);
         colors.iter().position(|e| *e == c).map_or(String::new(), |i| format!("\\cf{}", i + 1))
     };
-    let mut s = String::from("{\\rtf1\\ansi\\deff0{\\fonttbl{\\f0 Helvetica;}}\n");
+    // \af, \afs, \ab and \ai are the complex-script twins of \f, \fs, \b and \i: Word draws
+    // Thai with them. The Thai face is only declared when the text needs it.
+    let thai_doc = items.iter().any(|it| match it {
+        Item::Para(b, _) => has_thai(&b.text),
+        Item::Table(t) => t.rows.iter().flatten().any(|c| has_thai(&c.text)),
+        Item::Img(_) | Item::PageBreak => false,
+    });
+    let complex = |text: &str, size: f64, bold: bool, italic: bool| {
+        if !has_thai(text) {
+            return String::new();
+        }
+        format!("\\af1\\afs{}{}{}\\alang1054", (size * 2.0).round() as i64, if bold { "\\ab" } else { "" }, if italic { "\\ai" } else { "" })
+    };
+    let mut s = if thai_doc {
+        format!("{{\\rtf1\\ansi\\deff0{{\\fonttbl{{\\f0 Helvetica;}}{{\\f1\\fcharset222 {THAI_FACE};}}}}\n")
+    } else {
+        String::from("{\\rtf1\\ansi\\deff0{\\fonttbl{\\f0 Helvetica;}}\n")
+    };
     if !colors.is_empty() {
         s.push_str("{\\colortbl;");
         for [r, g, b] in &colors {
@@ -763,6 +961,7 @@ pub fn rtf(pages: &[Page]) -> String {
                     fmt.push_str("\\i");
                 }
                 fmt.push_str(&cf(b.color));
+                fmt.push_str(&complex(&b.text, b.size, b.bold, b.italic));
                 s.push_str(&format!("{{\\pard{fmt} {}\\par}}\n", rtf_text(&b.text)));
             }
             Item::Table(t) => {
@@ -789,6 +988,7 @@ pub fn rtf(pages: &[Page]) -> String {
                             fmt.push_str("\\i");
                         }
                         fmt.push_str(&cf(c.color));
+                        fmt.push_str(&complex(&c.text, c.size, c.bold, c.italic));
                         s.push_str(&format!("{{{fmt} {}}}\\cell", rtf_text(&c.text)));
                     }
                     s.push_str("\\row\n");
@@ -817,6 +1017,7 @@ mod tests {
             rotation: 0.0,
         };
         Page {
+            rules: Vec::new(),
             width: 612.0,
             height: 792.0,
             blocks: vec![
@@ -999,6 +1200,119 @@ mod tests {
         assert!(html(&[t], "Grid").contains("style=\"color:#FF0000\""));
     }
 
+    fn thai_page() -> Page {
+        let b = |t: &str, y: f64, size: f64, bold: bool, italic: bool| Block {
+            text: t.into(),
+            rect: [72.0, y, 500.0, y + size],
+            size,
+            bold,
+            italic,
+            color: [0.0; 3],
+            rotation: 0.0,
+        };
+        Page {
+            rules: Vec::new(),
+            width: 612.0,
+            height: 792.0,
+            blocks: vec![
+                b("รายงานประจำปี ๒๕๖๙", 700.0, 24.0, true, false),
+                b("น้ำใจ ผู้ใช้ ที่นี่ ปนกับ English และตัวเลข 1,234.56 บาท ยาวพอจะเป็นขนาดตัวอักษรหลักของหน้า", 650.0, 14.0, false, true),
+            ],
+            images: Vec::new(),
+        }
+    }
+
+    /// Thai is complex script in Office: without the `Cs` twins Word draws it regular at its
+    /// default size, and without a named face and language it may pick one that stacks marks badly.
+    #[test]
+    fn thai_keeps_its_size_weight_face_and_language_in_every_format() {
+        let pages = [thai_page()];
+        let doc = part(&docx(&pages, "ไทย"), "word/document.xml");
+        assert!(doc.contains("รายงานประจำปี ๒๕๖๙") && doc.contains("น้ำใจ ผู้ใช้ ที่นี่"), "{doc}");
+        assert!(
+            doc.contains(
+                "<w:rPr><w:rFonts w:cs=\"Tahoma\"/><w:b/><w:bCs/><w:sz w:val=\"48\"/><w:szCs w:val=\"48\"/><w:lang w:bidi=\"th-TH\"/></w:rPr>"
+            ),
+            "{doc}"
+        );
+        assert!(doc.contains("<w:i/><w:iCs/><w:sz w:val=\"28\"/><w:szCs w:val=\"28\"/>"), "{doc}");
+        let slide = part(&pptx(&pages, "ไทย"), "ppt/slides/slide1.xml");
+        assert!(slide.contains("<a:rPr lang=\"th-TH\"") && slide.contains("<a:cs typeface=\"Tahoma\"/></a:rPr>"), "{slide}");
+        let h = html(&pages, "ไทย");
+        assert!(h.contains("<html lang=\"th\">") && h.contains("Tahoma,sans-serif;line-height:1.7"), "{h}");
+        let r = rtf(&pages);
+        assert!(r.contains("{\\f1\\fcharset222 Tahoma;}") && r.contains("\\fs48\\b\\af1\\afs48\\ab\\alang1054 "), "{r}");
+        assert!(r.contains("\\fs28\\i\\af1\\afs28\\ai\\alang1054 \\u3609?\\u3657?\\u3635?"), "{r}");
+        // Text without Thai keeps the plain output.
+        let plain = [page()];
+        assert!(html(&plain, "t").contains("<html>\n") && !rtf(&plain).contains("\\af1") && !rtf(&plain).contains("Tahoma"));
+        let doc = part(&docx(&plain, "t"), "word/document.xml");
+        assert!(!doc.contains("w:rFonts") && !doc.contains("th-TH") && doc.contains("<w:sz w:val=\"48\"/><w:szCs w:val=\"48\"/>"), "{doc}");
+    }
+
+    /// A ruled grid is a table even when nothing in it shares a left edge (a centred header),
+    /// and a box whose side has no rule spans into its neighbour.
+    #[test]
+    fn a_ruled_grid_is_a_bordered_table_with_spans() {
+        let b = |t: &str, x: f64, y: f64, bold: bool| Block {
+            text: t.into(),
+            rect: [x, y, x + 40.0, y + 12.0],
+            size: 12.0,
+            bold,
+            italic: false,
+            color: [0.0; 3],
+            rotation: 0.0,
+        };
+        let h = |y: f64| [100.0, y - 0.3, 400.0, y + 0.3];
+        let v = |x: f64, y0: f64, y1: f64| [x - 0.3, y0, x + 0.3, y1];
+        let page = Page {
+            width: 612.0,
+            height: 792.0,
+            blocks: vec![
+                b("รายการ", 130.0, 574.0, true),
+                b("จำนวน", 240.0, 574.0, true),
+                b("ราคา", 330.0, 574.0, true),
+                b("น้ำปลา", 105.0, 544.0, false),
+                b("2 ขวด", 205.0, 544.0, false),
+                b("90.00", 305.0, 544.0, false),
+                b("รวมทั้งหมด", 105.0, 514.0, false),
+                b("90.00", 305.0, 514.0, false),
+                b("ข้อความนอกตารางที่ยาวพอจะเป็นเนื้อความของหน้านี้", 100.0, 700.0, false),
+            ],
+            images: Vec::new(),
+            // Three rows; the last has no rule between its first two columns.
+            rules: vec![
+                h(600.0),
+                h(570.0),
+                h(540.0),
+                h(510.0),
+                v(100.0, 510.0, 600.0),
+                v(400.0, 510.0, 600.0),
+                v(300.0, 510.0, 600.0),
+                v(200.0, 540.0, 600.0),
+            ],
+        };
+        let (found, consumed) = page_tables(&page);
+        assert_eq!(found.len(), 1, "{found:?}");
+        let t = &found[0];
+        assert!(t.ruled && t.cols == [100.0, 200.0, 300.0] && t.rect == [100.0, 510.0, 400.0, 600.0], "{t:?}");
+        let texts: Vec<Vec<(&str, usize)>> = t.rows.iter().map(|r| r.iter().map(|c| (c.text.as_str(), c.span)).collect()).collect();
+        assert_eq!(
+            texts,
+            [vec![("รายการ", 1), ("จำนวน", 1), ("ราคา", 1)], vec![("น้ำปลา", 1), ("2 ขวด", 1), ("90.00", 1)], vec![("รวมทั้งหมด", 2), ("90.00", 1)]]
+        );
+        assert!(t.rows[0][0].bold && !t.rows[1][0].bold);
+        assert_eq!(consumed, [true, true, true, true, true, true, true, true, false]);
+        let doc = part(&docx(std::slice::from_ref(&page), "t"), "word/document.xml");
+        assert!(doc.contains("<w:insideV w:val=\"single\"") && doc.contains("<w:gridSpan w:val=\"2\"/>"), "{doc}");
+        assert!(html(std::slice::from_ref(&page), "t").contains("<td colspan=\"2\">รวมทั้งหมด</td>"));
+        // A single box, or rules with no text inside, is not a table.
+        let frame = Page { rules: vec![h(600.0), h(510.0), v(100.0, 510.0, 600.0), v(400.0, 510.0, 600.0)], ..page.clone() };
+        assert!(ruled_tables(&frame.blocks, &frame.rules).0.is_empty());
+        let empty = Page { blocks: vec![b("นอกตาราง", 100.0, 700.0, false)], ..page };
+        assert!(ruled_tables(&empty.blocks, &empty.rules).0.is_empty());
+    }
+
     #[test]
     fn rtf_escapes_and_sizes() {
         let mut p = page();
@@ -1029,6 +1343,7 @@ mod tests {
             rotation: 0.0,
         };
         Page {
+            rules: Vec::new(),
             width: 612.0,
             height: 792.0,
             blocks: vec![
@@ -1114,6 +1429,7 @@ mod tests {
     fn word_opens_tables_up_to_its_column_limit() {
         // Rows of short numbers on a regular grid, n columns wide.
         let grid = |n: usize| Page {
+            rules: Vec::new(),
             width: 1500.0,
             height: 792.0,
             blocks: (0..3)
@@ -1152,6 +1468,7 @@ mod tests {
             rotation: 0.0,
         };
         let p = Page {
+            rules: Vec::new(),
             width: 612.0,
             height: 792.0,
             blocks: vec![

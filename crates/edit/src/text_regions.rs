@@ -17,6 +17,33 @@ fn same_plane(a: &TextLine, b: &TextLine) -> bool {
         })
 }
 
+/// Scripts written without spaces between words (Thai, Lao, Khmer, Myanmar): a line of them
+/// wraps inside a phrase, so the next row continues it directly. Producers drop the space at a
+/// wrap, which leaves no trace of the rarer wrap at a phrase space; joining directly keeps
+/// every word whole.
+fn unspaced(c: char) -> bool {
+    matches!(u32::from(c), 0x0E00..=0x0EFF | 0x1000..=0x109F | 0x1780..=0x17FF)
+}
+
+fn is_thai(c: char) -> bool {
+    matches!(u32::from(c), 0x0E00..=0x0E7F)
+}
+
+/// Right-to-left letters and the bidirectional controls: text the Unicode bidirectional
+/// algorithm may reorder.
+fn reorders(c: char) -> bool {
+    matches!(u32::from(c), 0x0590..=0x08FF | 0xFB1D..=0xFDFF | 0xFE70..=0xFEFF | 0x200E..=0x200F | 0x202A..=0x202E | 0x2066..=0x2069 | 0x10800..=0x10FFF | 0x1E800..=0x1EFFF)
+}
+
+/// This build has no Thai face to set edited Thai text in.
+fn no_thai_font() -> EditError {
+    EditError::Invalid(
+        "editing Thai text needs PdfCraft's Thai font (Noto Sans Thai), which this build doesn't include \
+         (to build it in, set CRAFT_FONTS_DIR to a craft-fonts checkout that has it)"
+            .into(),
+    )
+}
+
 fn union(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
     [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])]
 }
@@ -26,13 +53,37 @@ fn row_rect(row: &[usize], lines: &[TextLine]) -> Option<[f64; 4]> {
 }
 
 pub(super) fn group_blocks(lines: &[TextLine]) -> Vec<TextBlock> {
-    group_layout(lines, true)
+    group_layout(lines, true, &[])
+}
+
+/// Whether a vertical ruling line stands between `a` and the text `b` to its right.
+pub(super) fn ruled_apart(rules: &[[f64; 4]], a: [f64; 4], b: [f64; 4]) -> bool {
+    let mid = (a[1].max(b[1]) + a[3].min(b[3])) / 2.0;
+    rules.iter().any(|r| {
+        let x = (r[0] + r[2]) / 2.0;
+        r[3] - r[1] > r[2] - r[0] && x > a[2] - 1.0 && x < b[0] + 1.0 && r[1] <= mid && r[3] >= mid
+    })
+}
+
+/// Whether a horizontal ruling line as wide as both rows runs between `upper` and `lower`.
+fn ruled_below(rules: &[[f64; 4]], upper: [f64; 4], lower: [f64; 4]) -> bool {
+    let (x0, x1) = (upper[0].min(lower[0]), upper[2].max(lower[2]));
+    let mid_x = (x0 + x1) / 2.0;
+    rules.iter().any(|r| {
+        let y = (r[1] + r[3]) / 2.0;
+        r[2] - r[0] > r[3] - r[1]
+            && y < (upper[1] + upper[3]) / 2.0
+            && y > (lower[1] + lower[3]) / 2.0
+            && r[0] <= mid_x
+            && r[2] >= mid_x
+            && r[2] - r[0] >= (x1 - x0) * 0.9
+    })
 }
 
 /// Exporters currently represent a block with one style. Keep their style boundaries until
 /// they support rich runs, while edit selection may encompass the complete visual region.
-pub(super) fn group_reading_blocks(lines: &[TextLine]) -> Vec<TextBlock> {
-    group_layout(lines, false)
+pub(super) fn group_reading_blocks(lines: &[TextLine], rules: &[[f64; 4]]) -> Vec<TextBlock> {
+    group_layout(lines, false, rules)
 }
 
 fn same_style(a: &TextLine, b: &TextLine) -> bool {
@@ -45,13 +96,14 @@ fn same_style(a: &TextLine, b: &TextLine) -> bool {
         && (a.size - b.size).abs() < 0.01
 }
 
-fn group_layout(lines: &[TextLine], mixed: bool) -> Vec<TextBlock> {
+fn group_layout(lines: &[TextLine], mixed: bool, rules: &[[f64; 4]]) -> Vec<TextBlock> {
     let mut rows: Vec<Vec<usize>> = Vec::new();
     for (i, line) in lines.iter().enumerate() {
         let joins = rows.last().and_then(|r| r.last()).and_then(|i| lines.get(*i)).is_some_and(|prev| {
             let gap = line.rect[0] - prev.rect[2];
             (mixed || same_style(prev, line))
                 && same_plane(prev, line)
+                && !ruled_apart(rules, prev.rect, line.rect)
                 && (prev.origin.baseline - line.origin.baseline).abs() < prev.size.min(line.size) * 0.2
                 && gap >= -prev.size.min(line.size) * 0.2
                 && gap < prev.size.max(line.size) * 1.5
@@ -71,6 +123,8 @@ fn group_layout(lines: &[TextLine], mixed: bool) -> Vec<TextBlock> {
         }
     }
     let mut blocks: Vec<TextBlock> = Vec::new();
+    // Whether the previous row's text ended in whitespace before trimming.
+    let mut ends_spaced = false;
     for row in rows {
         let Some(first) = row.first().and_then(|i| lines.get(*i)) else { continue };
         let Some(rect) = row_rect(&row, lines) else { continue };
@@ -79,10 +133,24 @@ fn group_layout(lines: &[TextLine], mixed: bool) -> Vec<TextBlock> {
             let Some(prev) = prev_row.first().and_then(|i| lines.get(*i)) else { return false };
             let Some(pr) = row_rect(prev_row, lines) else { return false };
             let gap = prev.origin.baseline - first.origin.baseline;
+            // A block's rows share one leading. A clearly wider gap after two or more rows is
+            // paragraph spacing: the next paragraph starts its own block.
+            let leading = block
+                .rows
+                .len()
+                .checked_sub(2)
+                .and_then(|i| block.rows.get(i))
+                .and_then(|r| r.first())
+                .and_then(|i| lines.get(*i))
+                .map(|l| l.origin.baseline - prev.origin.baseline);
+            if leading.is_some_and(|l| l > 0.0 && gap > l * 1.25 + 0.5) {
+                return false;
+            }
             let tol = prev.size.max(first.size).max(1.0);
             let aligned = (pr[0] - rect[0]).abs() < tol || ((pr[0] + pr[2] - rect[0] - rect[2]) / 2.0).abs() < tol || (pr[2] - rect[2]).abs() < tol;
             (mixed || same_style(prev, first))
                 && same_plane(prev, first)
+                && !ruled_below(rules, pr, rect)
                 && aligned
                 && first.size.min(prev.size) >= first.size.max(prev.size) * 0.4
                 && gap > first.size.min(prev.size) * 0.8
@@ -126,14 +194,17 @@ fn group_layout(lines: &[TextLine], mixed: bool) -> Vec<TextBlock> {
             row_text.push_str(&line.text);
             block.lines.push(index);
         }
+        // A producer that keeps the space it wrapped at (Word does; Chrome drops it) says so here.
+        let spaced = row_text.starts_with(paragraph_separator) || std::mem::replace(&mut ends_spaced, row_text.ends_with(paragraph_separator));
+        let row_text = row_text.trim_matches(paragraph_separator);
         if !block.text.is_empty() {
             if block.text.ends_with('-') {
                 block.text.pop();
-            } else {
+            } else if spaced || !(block.text.ends_with(unspaced) && row_text.starts_with(unspaced)) {
                 block.text.push(' ');
             }
         }
-        block.text.push_str(row_text.trim_matches(paragraph_separator));
+        block.text.push_str(row_text);
         block.rect = union(block.rect, rect);
         block.rows.push(row);
     }
@@ -316,6 +387,11 @@ pub(super) fn rewrite_styled_block(
     let mut substituted = None;
     let mut fallback_names: std::collections::BTreeMap<(String, char), String> = std::collections::BTreeMap::new();
     let mut full_faces: HashMap<String, String> = HashMap::new();
+    // Thai needs its marks positioned by the font's own tables. A source subset rarely keeps them
+    // (or the letters the edit adds), so Thai it cannot shape is set in the Thai document face,
+    // embedded once: every Thai letter of the paragraph then shares one face and stacks correctly.
+    let thai_sample: String = draft.chars().filter(|c| is_thai(*c)).collect();
+    let mut source_shapes_thai: HashMap<String, bool> = HashMap::new();
     for (range, index) in styled_spans {
         let source = lines.get(index).unwrap_or(first);
         for ch in draft.get(range).unwrap_or_default().chars() {
@@ -324,7 +400,48 @@ pub(super) fn rewrite_styled_block(
                 continue;
             }
             let s = ch.to_string();
-            let name = if let Some(resource) = overrides.get(&index).and_then(|r| r.resource.as_ref()).or(style.resource.as_ref()) {
+            let chosen = overrides.get(&index).and_then(|r| r.resource.as_ref()).or(style.resource.as_ref());
+            let thai_face = if is_thai(ch) && chosen.is_none() {
+                let shapes = *source_shapes_thai.entry(source.font.clone()).or_insert_with(|| {
+                    fonts.get(source.font.as_bytes()).and_then(|f| doc.dict(f)).and_then(|f| pdfcraft_fonts::pdf::embedded_sfnt(doc, &f)).is_some_and(
+                        |bytes| {
+                            pdfcraft_fonts::embedding::covers(&bytes, &thai_sample)
+                                && pdfcraft_fonts::source_shaping::shape(&bytes, &thai_sample).is_ok()
+                        },
+                    )
+                });
+                if shapes {
+                    None
+                } else {
+                    Some((
+                        pdfcraft_fonts::document_thai_font().ok_or_else(no_thai_font)?,
+                        pdfcraft_fonts::document_thai_program().ok_or_else(no_thai_font)?,
+                    ))
+                }
+            } else {
+                None
+            };
+            let name = if let Some((face, program)) = thai_face {
+                if !pdfcraft_fonts::embedding::covers(program, &s) {
+                    return Err(EditError::Invalid(format!("the {} font has no glyph for U+{:04X}", face.family, u32::from(ch))));
+                }
+                let key = face.name();
+                if let Some(name) = full_faces.get(&key) {
+                    name.clone()
+                } else {
+                    let name = pdfcraft_fonts::embedding::embed(doc, &mut fonts, program, face.family).map_err(EditError::Invalid)?;
+                    let font = fonts
+                        .get(name.as_bytes())
+                        .and_then(|f| doc.dict(f))
+                        .ok_or_else(|| EditError::Invalid("the Thai font could not be loaded".into()))?;
+                    metrics.insert(name.clone(), Metrics::from_dict(doc, &font));
+                    full_faces.insert(key, name.clone());
+                    if !source.base_font.contains(&face.family.replace(' ', "")) {
+                        substituted = Some(face.family.to_string());
+                    }
+                    name
+                }
+            } else if let Some(resource) = chosen {
                 if !metrics.get(resource).is_some_and(|m| source_encodes(m, &s)) {
                     return Err(EditError::Invalid(format!("the selected font resource {resource} cannot show U+{:04X}", u32::from(ch))));
                 }
@@ -463,6 +580,24 @@ pub(super) fn rewrite_styled_block(
     let mut rows: Vec<Vec<(char, usize, String)>> = Vec::new();
     let mut row = Vec::new();
     let mut row_width = 0.0;
+    // Thai has no spaces between words: its wrap points come from the language model. Indexes
+    // into `chars` where a Thai word ends and another character follows.
+    let mut thai_breaks = std::collections::HashSet::new();
+    if chars.iter().any(|c| is_thai(c.0)) {
+        let all: String = chars.iter().map(|c| c.0).collect();
+        let (mut bytes, mut count) = (0usize, 0usize);
+        let mut ends = all.char_indices().map(|(i, c)| i + c.len_utf8());
+        for piece in pdfcraft_fonts::thai_break::wrap_pieces(&all) {
+            bytes = bytes.saturating_add(piece.len());
+            while ends.next().is_some_and(|end| {
+                count += 1;
+                end < bytes
+            }) {}
+            if piece.chars().any(is_thai) || chars.get(count).is_some_and(|c| is_thai(c.0)) {
+                thai_breaks.insert(count);
+            }
+        }
+    }
     // Wrap at word boundaries, retaining explicit source row breaks and whitespace.
     let mut at = 0;
     while at < chars.len() {
@@ -475,7 +610,7 @@ pub(super) fn rewrite_styled_block(
         }
         let mut end = at + 1;
         if !item.0.is_whitespace() {
-            while chars.get(end).is_some_and(|c| !c.0.is_whitespace()) {
+            while chars.get(end).is_some_and(|c| !c.0.is_whitespace()) && !thai_breaks.contains(&end) {
                 end += 1;
             }
         }
@@ -497,7 +632,9 @@ pub(super) fn rewrite_styled_block(
     }
     for row in &rows {
         let text: String = row.iter().map(|v| v.0).collect();
-        if pdfcraft_fonts::source_shaping::required(&text) && row.first().is_some_and(|first| row.iter().any(|v| v.1 != first.1 || v.2 != first.2)) {
+        // Right-to-left text is reordered across the whole row, which separate runs cannot do.
+        // Left-to-right shaped text (Thai, combining marks) shapes within each run.
+        if text.chars().any(reorders) && row.first().is_some_and(|first| row.iter().any(|v| v.1 != first.1 || v.2 != first.2)) {
             return Err(EditError::Invalid(
                 "contextual/bidi text across font or style boundaries needs a uniform full-face row; mixed contextual runs are not yet supported"
                     .into(),
@@ -695,4 +832,17 @@ pub(super) fn rewrite_styled_block(
         d.set(b"Resources".to_vec(), Object::Dict(res));
     })?;
     Ok(LineEdit { substituted })
+}
+
+#[cfg(test)]
+mod unspaced_tests {
+    #[test]
+    fn thai_lao_khmer_and_myanmar_rows_join_without_a_space() {
+        for c in ['ก', '้', 'ำ', '๙', 'ກ', 'ក', 'က'] {
+            assert!(super::unspaced(c), "{c}");
+        }
+        for c in ['a', '9', ' ', '.', '日', 'ب'] {
+            assert!(!super::unspaced(c), "{c}");
+        }
+    }
 }

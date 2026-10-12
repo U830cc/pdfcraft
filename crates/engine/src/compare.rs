@@ -202,7 +202,8 @@ impl crate::Document {
                         })
                     })
                     .collect();
-                pdfcraft_export::Page { width: info.width as f64, height: info.height as f64, blocks, images }
+                let rules = pdfcraft_edit::page_rules(cos, i).unwrap_or_default().into_iter().map(visible_rect).collect();
+                pdfcraft_export::Page { width: info.width as f64, height: info.height as f64, blocks, images, rules }
             })
             .collect()
     }

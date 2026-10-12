@@ -48,7 +48,12 @@ fn run_drawingml(text: &str, size: f64, bold: bool, italic: bool, color: [f64; 3
         rpr.push_str(" i=\"1\"");
     }
     let fill = if let Some(h) = hex(color) { format!("<a:solidFill><a:srgbClr val=\"{h}\"/></a:solidFill>") } else { String::new() };
-    format!("<a:r><a:rPr{rpr}>{fill}</a:rPr><a:t>{}</a:t></a:r>", esc(text))
+    // Thai is complex script: PowerPoint draws it with the run's `cs` face and breaks its lines
+    // by the run's language. (`lang` is the first attribute of CT_TextCharacterProperties; the
+    // fill precedes the faces.)
+    let (lang, face) =
+        if crate::has_thai(text) { (" lang=\"th-TH\"", format!("<a:cs typeface=\"{}\"/>", crate::THAI_FACE)) } else { ("", String::new()) };
+    format!("<a:r><a:rPr{lang}{rpr}>{fill}{face}</a:rPr><a:t>{}</a:t></a:r>", esc(text))
 }
 
 /// Generates a DrawingML table inside a `<p:graphicFrame>` with explicit cell borders.
@@ -358,6 +363,7 @@ mod tests {
 
     fn sample_page() -> Page {
         Page {
+            rules: Vec::new(),
             width: 720.0,
             height: 540.0,
             blocks: vec![
@@ -511,6 +517,7 @@ mod tests {
             rotation: 0.0,
         };
         let table_page = Page {
+            rules: Vec::new(),
             width: 612.0,
             height: 792.0,
             blocks: vec![
@@ -619,7 +626,7 @@ mod tests {
         let images = (0..40)
             .map(|k| Image { ext: "png", bytes: vec![0; 4], rect: [0.0, -1e300, 1e-300, 1e300 - k as f64], size: [1.0, 1.0], rotation: 0.0 })
             .collect();
-        let p = Page { width: f64::MAX, height: f64::NAN, blocks, images };
+        let p = Page { width: f64::MAX, height: f64::NAN, blocks, images, rules: Vec::new() };
         let bytes = pptx(&[p], "Hostile");
         let slide = part(&bytes, "ppt/slides/slide1.xml");
         assert!(slide.contains("Title") && slide.contains("<p:pic>"), "the slide is still written");
@@ -676,6 +683,7 @@ mod tests {
             rotation: 0.0,
         };
         let p = Page {
+            rules: Vec::new(),
             width: 720.0,
             height: 540.0,
             blocks: vec![

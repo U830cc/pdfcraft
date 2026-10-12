@@ -934,6 +934,8 @@ fn reading_lines(doc: &Document, page: usize) -> Result<Vec<TextLine>, EditError
         next_stream: usize,
         path: Vec<pdfcraft_cos::ObjRef>,
         visits: usize,
+        /// The page's ruling lines: text on either side of one is in different table cells.
+        rules: Vec<[f64; 4]>,
     }
     fn walk(w: &mut Walk, ops: &[Op], resources: &Dict, carry: &mut Carry, stream: usize) {
         let fonts_res = resources.get(b"Font").map(|f| w.doc.resolve(f)).and_then(|f| f.as_dict().cloned()).unwrap_or_default();
@@ -946,6 +948,9 @@ fn reading_lines(doc: &Document, page: usize) -> Result<Vec<TextLine>, EditError
             while let Some((_, name, ts)) = forms.next_if(|f| f.0 < s.op) {
                 enter(w, resources, &name, ts);
                 // Text after a form starts a new line.
+                last = None;
+            }
+            if last.is_some() && w.lines.last().is_some_and(|l| regions::ruled_apart(&w.rules, l.rect, s.rect)) {
                 last = None;
             }
             add_shown(&mut w.lines, &mut last, s, stream);
@@ -972,7 +977,8 @@ fn reading_lines(doc: &Document, page: usize) -> Result<Vec<TextLine>, EditError
     let p = page_dict(doc, page)?;
     let res = p.dict.get(b"Resources").map(|r| doc.resolve(r)).and_then(|r| r.as_dict().cloned()).unwrap_or_default();
     let streams = content_streams(doc, &p.dict);
-    let mut w = Walk { doc, lines: Vec::new(), next_stream: streams.len(), path: Vec::new(), visits: 0 };
+    let rules = crate::rules::page_rules(doc, page).unwrap_or_default();
+    let mut w = Walk { doc, lines: Vec::new(), next_stream: streams.len(), path: Vec::new(), visits: 0, rules };
     let mut carry = Carry::new();
     for (si, (_, data)) in streams.into_iter().enumerate() {
         walk(&mut w, &parse(&data).ops, &res, &mut carry, si);
@@ -1524,7 +1530,9 @@ pub fn clear_block(doc: &mut Document, page: usize, block: usize) -> Result<(), 
 /// [`text_blocks`] indexes, so they can't be passed to [`replace_block`] or [`rewrite_block`].
 pub fn reading_blocks(doc: &Document, page: usize) -> Result<Vec<TextBlock>, EditError> {
     let lines = reading_lines(doc, page)?;
-    Ok(regions::group_reading_blocks(&lines))
+    // Ruling lines keep the text of neighbouring table cells in separate blocks.
+    let rules = crate::rules::page_rules(doc, page).unwrap_or_default();
+    Ok(regions::group_reading_blocks(&lines, &rules))
 }
 
 // An ideographic space carries intentional Japanese spacing, including paragraph indentation.

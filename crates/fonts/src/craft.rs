@@ -75,6 +75,14 @@ pub fn document_thai_font() -> Option<&'static CraftFont> {
     ui_thai_fonts().into_iter().next()
 }
 
+/// The Thai document face as a static font program, ready to embed in a PDF: craft-fonts ships
+/// Noto Sans Thai as a variable font, and a PDF embeds one instance. Glyph ids match
+/// [`document_thai_font`]. `None` without the face.
+pub fn document_thai_program() -> Option<&'static [u8]> {
+    static PROGRAM: std::sync::OnceLock<Option<Vec<u8>>> = std::sync::OnceLock::new();
+    PROGRAM.get_or_init(|| crate::embedding::static_default(document_thai_font()?.bytes).ok()).as_deref()
+}
+
 /// The `Hebr` craft-fonts faces for Hebrew interface text (file names, document titles, text
 /// being edited), in manifest order. Empty when built without craft-fonts or when it has no
 /// Hebrew face.

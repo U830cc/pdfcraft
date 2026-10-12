@@ -68,6 +68,80 @@ pub fn validate_document_input(bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+/// The default instance of a variable TrueType font as a static program: the same tables without
+/// the variation data (`fvar`, `gvar`, `avar`, `HVAR`, `MVAR`, `STAT`, `cvar`). `glyf` and `hmtx`
+/// already hold the default instance, and glyph ids do not change, so text shaped with the
+/// variable font draws the same with this one. A static font comes back unchanged.
+pub fn static_default(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    const VARIATION: [&[u8; 4]; 7] = [b"fvar", b"gvar", b"avar", b"HVAR", b"MVAR", b"STAT", b"cvar"];
+    let bad = || String::from("the font's table directory is damaged");
+    let u16_at = |at: usize| bytes.get(at..at.checked_add(2)?).map(|b| u16::from_be_bytes([b[0], b[1]]));
+    let u32_at = |at: usize| bytes.get(at..at.checked_add(4)?).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
+    if bytes.len() > 16 << 20 {
+        return Err("the font exceeds 16 MiB".into());
+    }
+    let count = usize::from(u16_at(4).ok_or_else(bad)?);
+    let mut tables: Vec<([u8; 4], Vec<u8>)> = Vec::with_capacity(count);
+    let mut variable = false;
+    for i in 0..count {
+        let record = 12 + i * 16;
+        let tag: [u8; 4] = bytes.get(record..record + 4).and_then(|t| t.try_into().ok()).ok_or_else(bad)?;
+        if VARIATION.iter().any(|v| **v == tag) {
+            variable = true;
+            continue;
+        }
+        let (offset, length) = (u32_at(record + 8).ok_or_else(bad)? as usize, u32_at(record + 12).ok_or_else(bad)? as usize);
+        let mut data = bytes.get(offset..offset.checked_add(length).ok_or_else(bad)?).ok_or_else(bad)?.to_vec();
+        if &tag == b"head" {
+            // checkSumAdjustment is computed over the file with this field zero.
+            data.get_mut(8..12).ok_or_else(bad)?.fill(0);
+        }
+        tables.push((tag, data));
+    }
+    if !variable {
+        return Ok(bytes.to_vec());
+    }
+    let sum = |data: &[u8]| {
+        data.chunks(4).fold(0u32, |acc, c| {
+            let mut word = [0u8; 4];
+            for (w, b) in word.iter_mut().zip(c) {
+                *w = *b;
+            }
+            acc.wrapping_add(u32::from_be_bytes(word))
+        })
+    };
+    let n = u16::try_from(tables.len()).map_err(|_| bad())?;
+    // The largest power of two not above the table count, as the binary-search header wants.
+    let entry_selector = 15u16.saturating_sub(n.max(1).leading_zeros() as u16);
+    let search_range = (1u16 << entry_selector).saturating_mul(16);
+    let mut out = Vec::with_capacity(bytes.len());
+    out.extend_from_slice(bytes.get(0..4).ok_or_else(bad)?);
+    for v in [n, search_range, entry_selector, n.saturating_mul(16).saturating_sub(search_range)] {
+        out.extend_from_slice(&v.to_be_bytes());
+    }
+    let mut offset = 12 + tables.len() * 16;
+    let mut head_at = None;
+    for (tag, data) in &tables {
+        out.extend_from_slice(tag);
+        out.extend_from_slice(&sum(data).to_be_bytes());
+        out.extend_from_slice(&u32::try_from(offset).map_err(|_| bad())?.to_be_bytes());
+        out.extend_from_slice(&u32::try_from(data.len()).map_err(|_| bad())?.to_be_bytes());
+        if tag == b"head" {
+            head_at = Some(offset);
+        }
+        offset += data.len().div_ceil(4) * 4;
+    }
+    for (_, data) in &tables {
+        out.extend_from_slice(data);
+        out.resize(out.len().div_ceil(4) * 4, 0);
+    }
+    let adjustment = 0xB1B0_AFBAu32.wrapping_sub(sum(&out));
+    if let Some(field) = head_at.and_then(|at| out.get_mut(at + 8..at + 12)) {
+        field.copy_from_slice(&adjustment.to_be_bytes());
+    }
+    Ok(out)
+}
+
 /// Validate before allocating any PDF objects, so an invalid font cannot partly mutate a doc.
 pub fn validate(bytes: &[u8]) -> Result<(), String> {
     if bytes.len() > 16 << 20 {
@@ -273,5 +347,31 @@ mod tests {
         embed(&mut doc, &mut second, bytes, "Inter").unwrap();
         assert_eq!(doc.scan_objects().filter(|(_, o)| matches!(o.as_ref(), Object::Stream(s) if s.dict.get(b"PCFullFont").is_some())).count(), 1);
         assert_eq!(face_key("ABCDEF+Droid-Sans-Fallback"), face_key("Droid Sans Fallback"));
+    }
+}
+
+#[cfg(test)]
+mod static_default_tests {
+    use super::*;
+
+    #[test]
+    fn the_thai_variable_face_becomes_an_embeddable_static_font_with_the_same_glyphs() {
+        // Damaged or truncated input is refused, never a panic.
+        assert!(static_default(b"").is_err() && static_default(&[0, 1, 0, 0, 0xFF, 0xFF, 0, 0, 0, 0, 0, 0]).is_err());
+        let Some(face) = crate::document_thai_font() else {
+            assert!(crate::document_thai_program().is_none());
+            return;
+        };
+        let fixed = static_default(face.bytes).unwrap();
+        validate(&fixed).unwrap();
+        let (variable, fixed_font) = (FontRef::new(face.bytes).unwrap(), FontRef::new(&fixed).unwrap());
+        assert!(fixed_font.fvar().is_err() && fixed_font.gsub().is_ok() && fixed_font.gpos().is_ok());
+        for c in "กขค้ำิู่๙A1 ".chars() {
+            assert_eq!(variable.charmap().map(c), fixed_font.charmap().map(c), "{c}");
+        }
+        assert!(covers(&fixed, "สวัสดี น้ำ ผู้ใช้"));
+        // A static font is returned as it is.
+        assert_eq!(static_default(&fixed).unwrap(), fixed);
+        assert_eq!(crate::document_thai_program(), Some(fixed.as_slice()));
     }
 }
