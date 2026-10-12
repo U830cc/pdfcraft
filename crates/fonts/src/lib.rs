@@ -21,7 +21,7 @@ pub use craft::{
 pub use script::{
     GlyphError, GlyphOutline, INTER_REGULAR, MAX_SIGNATURE_CHARS, ScriptOutline, japanese_glyph, japanese_glyph_from, script_missing, script_outline,
 };
-pub use shaping::{ShapedCluster, ShapedScript, arabic_glyph, arabic_has, shape_arabic, shape_thai, shaped_glyph, thai_has};
+pub use shaping::{ShapedCluster, ShapedScript, arabic_glyph, arabic_has, shape_arabic, shape_thai, shape_thai_styled, shaped_glyph, thai_has};
 
 /// Approximate advance of `s` in Helvetica (or Arial) at `size` points.
 pub fn helvetica_width(s: &str, size: f64) -> f64 {

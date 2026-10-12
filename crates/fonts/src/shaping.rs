@@ -2,7 +2,7 @@
 
 use std::sync::OnceLock;
 
-use harfrust::{BufferClusterLevel, Direction, ShapeOptions, ShaperData, UnicodeBuffer, script};
+use harfrust::{BufferClusterLevel, Direction, ShapeOptions, ShaperData, ShaperInstance, UnicodeBuffer, script};
 use skrifa::instance::{LocationRef, Size};
 use skrifa::raw::TableProvider;
 use skrifa::{FontRef, GlyphId, MetadataProvider};
@@ -27,13 +27,25 @@ pub struct ShapedCluster {
 pub enum ShapedScript {
     Arabic,
     Thai,
+    /// The Thai face at its bold weight (an instance of the same variable font, so the glyph
+    /// ids are the Thai ones but the outlines and advances differ).
+    ThaiBold,
+}
+
+/// The weight of [`ShapedScript::ThaiBold`] on the face's `wght` axis.
+const BOLD_WEIGHT: f32 = 700.0;
+
+/// The shaper's view of the bold instance. `None` without the face.
+fn thai_bold_instance() -> Option<&'static ShaperInstance> {
+    static INSTANCE: OnceLock<Option<ShaperInstance>> = OnceLock::new();
+    INSTANCE.get_or_init(|| face(ShapedScript::Thai).map(|(font, _)| ShaperInstance::from_variations(font, [("wght", BOLD_WEIGHT)]))).as_ref()
 }
 
 impl ShapedScript {
     pub fn font(self) -> Option<&'static crate::CraftFont> {
         match self {
             Self::Arabic => crate::document_arabic_font(),
-            Self::Thai => crate::document_thai_font(),
+            Self::Thai | Self::ThaiBold => crate::document_thai_font(),
         }
     }
 }
@@ -43,7 +55,7 @@ fn face(script: ShapedScript) -> Option<&'static (FontRef<'static>, ShaperData)>
     static THAI: OnceLock<Option<(FontRef<'static>, ShaperData)>> = OnceLock::new();
     let cache = match script {
         ShapedScript::Arabic => &FACE,
-        ShapedScript::Thai => &THAI,
+        ShapedScript::Thai | ShapedScript::ThaiBold => &THAI,
     };
     cache
         .get_or_init(|| {
@@ -76,21 +88,27 @@ pub fn shape_thai(text: &str) -> Result<Vec<ShapedCluster>, GlyphError> {
     shape_script(text, false, ShapedScript::Thai)
 }
 
+/// [`shape_thai`] in the regular or the bold weight of the face.
+pub fn shape_thai_styled(text: &str, bold: bool) -> Result<Vec<ShapedCluster>, GlyphError> {
+    shape_script(text, false, if bold { ShapedScript::ThaiBold } else { ShapedScript::Thai })
+}
+
 fn shape_script(text: &str, rtl: bool, kind: ShapedScript) -> Result<Vec<ShapedCluster>, GlyphError> {
     let (font, data) = face(kind).ok_or(GlyphError::NoFont)?;
-    let shaper = data.shaper(font).build();
+    let instance = if kind == ShapedScript::ThaiBold { thai_bold_instance() } else { None };
+    let shaper = data.shaper(font).instance(instance).build();
     let scale = 1.0 / f64::from(shaper.units_per_em().max(1));
     let mut buffer = UnicodeBuffer::new();
     buffer.push_str(text);
     buffer.set_direction(if rtl { Direction::RightToLeft } else { Direction::LeftToRight });
     buffer.set_script(match kind {
         ShapedScript::Arabic => script::ARABIC,
-        ShapedScript::Thai => script::THAI,
+        ShapedScript::Thai | ShapedScript::ThaiBold => script::THAI,
     });
     // Preserve the historical Arabic per-character mapping; Thai marks stay with their base.
     buffer.set_cluster_level(match kind {
         ShapedScript::Arabic => BufferClusterLevel::Characters,
-        ShapedScript::Thai => BufferClusterLevel::MonotoneGraphemes,
+        ShapedScript::Thai | ShapedScript::ThaiBold => BufferClusterLevel::MonotoneGraphemes,
     });
     let shaped = shaper.shape(buffer, ShapeOptions::new());
     // Clusters are byte offsets into `text`; a cluster shows the characters up to the next one.
@@ -135,8 +153,9 @@ pub fn shaped_glyph(script: ShapedScript, id: u32) -> Result<GlyphOutline, Glyph
         return Err(GlyphError::Missing);
     }
     let gid = GlyphId::new(id);
-    let loc = LocationRef::default();
-    let scale = 1.0 / font.metrics(Size::unscaled(), loc).units_per_em.max(1) as f64;
+    let bold = font.axes().location([("wght", BOLD_WEIGHT)]);
+    let loc = if script == ShapedScript::ThaiBold { LocationRef::from(&bold) } else { LocationRef::default() };
+    let scale = 1.0 / font.metrics(Size::unscaled(), LocationRef::default()).units_per_em.max(1) as f64;
     let width = font.glyph_metrics(Size::unscaled(), loc).advance_width(gid).unwrap_or(0.0) as f64 * scale;
     // Marks have no advance; the widest ligatures (U+FDFD) span a few em.
     if !width.is_finite() || !(0.0..=8.0).contains(&width) {
@@ -145,7 +164,7 @@ pub fn shaped_glyph(script: ShapedScript, id: u32) -> Result<GlyphOutline, Glyph
     if font.outline_glyphs().get(gid).is_none() {
         return Ok(GlyphOutline { contours: Vec::new(), width, bbox: [0.0, 0.0, width, 0.0] });
     }
-    crate::script::bounded_outline(font, gid, width)
+    crate::script::bounded_outline_at(font, gid, width, loc)
 }
 
 #[cfg(test)]
@@ -248,5 +267,28 @@ mod thai_tests {
         assert!(stacked[0].glyphs.iter().any(|(_, p)| p[0] != 0.0 || p[1] != 0.0));
         assert_eq!(shape_thai("日"), Err(GlyphError::Missing));
         assert_eq!(shaped_glyph(ShapedScript::Thai, u32::MAX).map(|_| ()), Err(GlyphError::Missing));
+    }
+}
+
+#[cfg(test)]
+mod thai_bold_tests {
+    use super::*;
+
+    #[test]
+    fn bold_thai_is_the_same_text_in_wider_heavier_glyphs() {
+        if crate::document_thai_font().is_none() {
+            assert_eq!(shape_thai_styled("น้ำ", true), Err(GlyphError::NoFont));
+            return;
+        }
+        let (regular, bold) = (shape_thai_styled("ตัวหนา น้ำ กิ่", false).unwrap(), shape_thai_styled("ตัวหนา น้ำ กิ่", true).unwrap());
+        assert_eq!(regular, shape_thai("ตัวหนา น้ำ กิ่").unwrap());
+        assert_eq!(bold.iter().map(|c| c.text.as_str()).collect::<String>(), "ตัวหนา น้ำ กิ่");
+        assert!(bold.iter().all(|c| c.script == ShapedScript::ThaiBold));
+        let width = |c: &[ShapedCluster]| c.iter().map(|c| c.advance).sum::<f64>();
+        assert!(width(&bold) > width(&regular) * 1.02, "{} vs {}", width(&bold), width(&regular));
+        // The same glyph is drawn heavier: more ink sideways.
+        let id = regular[0].glyphs[0].0;
+        let ink = |s| shaped_glyph(s, id).map(|g| g.bbox[2] - g.bbox[0]).unwrap();
+        assert!(ink(ShapedScript::ThaiBold) > ink(ShapedScript::Thai), "{} vs {}", ink(ShapedScript::ThaiBold), ink(ShapedScript::Thai));
     }
 }

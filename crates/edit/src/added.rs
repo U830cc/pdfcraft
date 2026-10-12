@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 
 use pdfcraft_cos::{Dict, Document, ObjRef, Object, PdfString, Stream};
 use pdfcraft_fonts::{
-    GlyphError, GlyphOutline, ShapedCluster, ShapedScript, helvetica_width, literal, shape_arabic, shape_thai, shaped_glyph, win_ansi,
+    GlyphError, GlyphOutline, ShapedCluster, ShapedScript, helvetica_width, literal, shape_arabic, shape_thai_styled, shaped_glyph, win_ansi,
 };
 use unicode_bidi::{Level, ParagraphBidiInfo};
 
@@ -416,7 +416,7 @@ fn shaped_layout(t: &AddedText, line: &str, rtl: bool) -> Result<(Vec<Piece>, f6
         let mut segments: Vec<(Option<ShapedScript>, String)> = Vec::new();
         for c in text.chars().filter(|c| !is_bidi_control(*c)) {
             let script = if is_thai(c) {
-                Some(ShapedScript::Thai)
+                Some(if t.bold { ShapedScript::ThaiBold } else { ShapedScript::Thai })
             } else if is_arabic(c) || (run_rtl && !c.is_alphanumeric() && pdfcraft_fonts::arabic_has(c)) {
                 Some(ShapedScript::Arabic)
             } else {
@@ -434,7 +434,9 @@ fn shaped_layout(t: &AddedText, line: &str, rtl: bool) -> Result<(Vec<Piece>, f6
             pieces.push(if let Some(script) = script {
                 let shaped = match script {
                     ShapedScript::Arabic => shape_arabic(&s, run_rtl).map_err(|e| arabic_error(e, &s))?,
-                    ShapedScript::Thai => shape_thai(&s).map_err(|e| thai_error(e, &s))?,
+                    ShapedScript::Thai | ShapedScript::ThaiBold => {
+                        shape_thai_styled(&s, script == ShapedScript::ThaiBold).map_err(|e| thai_error(e, &s))?
+                    }
                 };
                 Piece::Shaped(shaped)
             } else if run_rtl {
@@ -544,7 +546,7 @@ fn draw_laid_shaped(
             if let std::collections::hash_map::Entry::Vacant(entry) = outlines.entry((c.script, *id)) {
                 entry.insert(outline(c.script, *id).map_err(|e| match c.script {
                     ShapedScript::Arabic => arabic_error(e, &c.text),
-                    ShapedScript::Thai => thai_error(e, &c.text),
+                    ShapedScript::Thai | ShapedScript::ThaiBold => thai_error(e, &c.text),
                 })?);
             }
         }
@@ -678,7 +680,7 @@ fn type3_shaped(doc: &mut Document, clusters: &[&ShapedCluster], outlines: &Hash
         Some(script) => script.font().map_or(
             match script {
                 ShapedScript::Arabic => "Arabic",
-                ShapedScript::Thai => "Thai",
+                ShapedScript::Thai | ShapedScript::ThaiBold => "Thai",
             },
             |f| f.family,
         ),

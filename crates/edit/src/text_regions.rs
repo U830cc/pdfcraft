@@ -523,7 +523,11 @@ pub(super) fn rewrite_styled_block(
                 source.origin.state.word_spacing,
             ) * source.origin.state.scale
                 * source.origin.k;
-            let changed_face = style.resource.is_some() || overrides.get(&index).is_some_and(|r| r.family.is_some() || r.resource.is_some());
+            // Shaped source text (Thai marks, ligatures) doesn't advance by its characters'
+            // widths, so its nominal width says nothing about kerning.
+            let changed_face = style.resource.is_some()
+                || overrides.get(&index).is_some_and(|r| r.family.is_some() || r.resource.is_some())
+                || pdfcraft_fonts::source_shaping::required(&source.text);
             let factor = if nominal > 0.0 && !changed_face { ((source.rect[2] - source.rect[0]) / nominal).clamp(0.5, 2.0) } else { 1.0 };
             calibration.insert(index, factor);
         }
@@ -544,7 +548,8 @@ pub(super) fn rewrite_styled_block(
             source.origin.state.word_spacing,
         ) * overrides.get(&item.1).and_then(|r| r.scale).or(style.scale).map_or(source.origin.state.scale, |s| (s / 100.0).clamp(0.1, 10.0))
             * source.origin.k
-            * calibration.get(&item.1).copied().unwrap_or(1.0)
+            // The source run's own font only: a substituted face has its own advances.
+            * if item.2 == source.font { calibration.get(&item.1).copied().unwrap_or(1.0) } else { 1.0 }
     };
     let measure = |items: &[(char, usize, String)]| -> Result<f64, EditError> {
         let mut width = 0.0;
@@ -728,7 +733,7 @@ pub(super) fn rewrite_styled_block(
             if let Some(s) = overrides.get(&item.1).and_then(|r| r.scale).or(style.scale) {
                 state.scale = (s / 100.0).clamp(0.1, 10.0);
             }
-            if !shaped_runs.contains_key(&(row_index, pos)) {
+            if !shaped_runs.contains_key(&(row_index, pos)) && item.2 == source.font {
                 state.scale *= calibration.get(&item.1).copied().unwrap_or(1.0);
             }
             if let Some([r, g, b]) = overrides.get(&item.1).and_then(|r| r.color).or(style.color) {
