@@ -164,6 +164,90 @@ impl FontText {
     }
 }
 
+/// `s` split into runs of Thai (`true`) and of everything else, in order.
+fn thai_runs(s: &str) -> Vec<(bool, &str)> {
+    let mut out: Vec<(bool, &str)> = Vec::new();
+    let mut start = 0;
+    let mut kind: Option<bool> = None;
+    for (i, c) in s.char_indices() {
+        let thai = pdfcraft_fonts::thai_break::is_thai(c);
+        if kind.is_some_and(|k| k != thai)
+            && let (Some(k), Some(run)) = (kind, s.get(start..i))
+        {
+            out.push((k, run));
+            start = i;
+        }
+        kind = Some(thai);
+    }
+    if let (Some(k), Some(run)) = (kind, s.get(start..)) {
+        out.push((k, run));
+    }
+    out
+}
+
+/// Whether Thai in `s` can be drawn: there is some, and this build has the Thai face.
+fn draws_thai(s: &str) -> bool {
+    s.chars().any(pdfcraft_fonts::thai_break::is_thai) && pdfcraft_fonts::document_thai_font().is_some()
+}
+
+/// A field's text width at `size`: Thai by its shaped advances, the rest in the field's font.
+fn text_width(enc: &FontText, s: &str, size: f64) -> f64 {
+    if !draws_thai(s) {
+        return enc.width(s, size);
+    }
+    thai_runs(s)
+        .into_iter()
+        .map(|(thai, run)| match pdfcraft_fonts::shape_thai(run) {
+            Ok(clusters) if thai => clusters.iter().map(|c| c.advance).sum::<f64>() * size,
+            _ => enc.width(run, size),
+        })
+        .sum()
+}
+
+/// A shaped Thai run as filled outlines with its origin at (`x`, `y`), and its width. No font
+/// resource is involved: the appearance holds the shapes, with every mark where the Thai face's
+/// own tables put it, and the field's value keeps the text. `None` if a glyph can't be read.
+fn thai_outlines(run: &str, x: f64, y: f64, size: f64) -> Option<(Vec<u8>, f64)> {
+    let clusters = pdfcraft_fonts::shape_thai(run).ok()?;
+    let mut out = format!("q {} 0 0 {} {} {} cm\n", n(size), n(size), n(x), n(y)).into_bytes();
+    let mut pen = 0.0;
+    // Em units, three decimals: a thousandth of an em is below a pixel at any field size.
+    let em = |v: f64| format!("{:.3}", v).trim_end_matches('0').trim_end_matches('.').to_string();
+    for cluster in &clusters {
+        for (id, [dx, dy]) in &cluster.glyphs {
+            let glyph = pdfcraft_fonts::shaped_glyph(cluster.script, *id).ok()?;
+            for contour in &glyph.contours {
+                for (i, p) in contour.iter().enumerate() {
+                    out.extend(format!("{} {} {}\n", em(pen + dx + p[0]), em(dy + p[1]), if i == 0 { "m" } else { "l" }).bytes());
+                }
+                out.extend_from_slice(b"h\n");
+            }
+        }
+        pen += cluster.advance;
+    }
+    out.extend_from_slice(b"f\nQ\n");
+    Some((out, pen * size))
+}
+
+/// [`wrap_with`] for text with Thai, which has no spaces between words: lines break between
+/// words (`pdfcraft_fonts::thai_break`), never inside a word or a cluster unless one word is
+/// wider than the field.
+fn wrap_thai(text: &str, size: f64, width: f64, measure: impl Fn(&str, f64) -> f64) -> Vec<String> {
+    let mut lines = Vec::new();
+    for para in text.split(['\n', '\r']) {
+        let mut line = String::new();
+        for piece in pdfcraft_fonts::thai_break::wrap_pieces(para) {
+            let fits = measure(format!("{line}{piece}").trim_end(), size) <= width;
+            if !fits && !line.is_empty() {
+                lines.push(std::mem::take(&mut line).trim_end().to_string());
+            }
+            line.push_str(piece);
+        }
+        lines.push(line.trim_end().to_string());
+    }
+    lines
+}
+
 /// The font resource for `name` from the form's `/DR`, if it is a font we can encode for.
 fn dr_font(doc: &Document, name: &str) -> Option<(Object, FontText)> {
     let af = acroform(doc)?;
@@ -325,20 +409,24 @@ pub fn field_appearance_drawn(doc: &Document, f: &Field, w: &Widget, values: &[S
         values.first().cloned().unwrap_or_default()
     };
     let text = if f.has(flags::PASSWORD) { "*".repeat(text.chars().count()) } else { text };
+    // Thai is drawn as outlines whatever the font, so only the rest has to fit the font.
+    let latin = |s: &str| -> String {
+        if draws_thai(s) { thai_runs(s).into_iter().filter(|(thai, _)| !thai).map(|(_, run)| run).collect() } else { s.to_string() }
+    };
     let can_show = |enc: &FontText| {
         if f.kind == FieldKind::List {
-            f.options.iter().all(|(_, display)| enc.can_encode(display))
+            f.options.iter().all(|(_, display)| enc.can_encode(&latin(display)))
         } else if f.kind == FieldKind::Text && f.has(flags::MULTILINE) {
-            text.split(['\n', '\r']).all(|line| enc.can_encode(line))
+            text.split(['\n', '\r']).all(|line| enc.can_encode(&latin(line)))
         } else {
-            enc.can_encode(&text)
+            enc.can_encode(&latin(&text))
         }
     };
     let (font_name, font_obj, enc) = match dr_font(doc, &da.font).filter(|(_, enc)| can_show(enc)) {
         Some((o, enc)) => (da.font.clone(), o, enc),
         None => ("Helv".to_string(), helvetica(), FontText::WinAnsi),
     };
-    let width_of = |text: &str, size: f64| enc.width(text, size);
+    let width_of = |text: &str, size: f64| text_width(&enc, text, size);
     let (mut c, bw) = frame(doc, &wd, width, height);
     let pad = 2.0 + bw;
     let inner_w = (width - 2.0 * pad).max(1.0);
@@ -346,15 +434,39 @@ pub fn field_appearance_drawn(doc: &Document, f: &Field, w: &Widget, values: &[S
     let mut body: Vec<u8> = Vec::new();
     // The first character drawn that the font can't hold (drawn as `?`), for the caller to report.
     let mut unencodable: Option<char> = None;
-    let mut show = |body: &mut Vec<u8>, x: f64, y: f64, text: &str| {
+    // Thai outlines, painted after the text object (paths can't be inside one).
+    let mut outlines: Vec<u8> = Vec::new();
+    let mut show = |body: &mut Vec<u8>, x: f64, y: f64, text: &str, size: f64| {
         // A line break in a single-line value is a space, as in viewers (multiline text is split).
         let text: String = text.chars().map(|c| if matches!(c, '\n' | '\r') { ' ' } else { c }).collect();
-        if unencodable.is_none() {
-            unencodable = enc.first_unencodable(&text);
+        let mut tj = |body: &mut Vec<u8>, x: f64, run: &str| {
+            if unencodable.is_none() {
+                unencodable = enc.first_unencodable(run);
+            }
+            body.extend(format!("1 0 0 1 {} {} Tm ", n(x), n(y)).bytes());
+            body.extend(literal(&enc.encode(run)));
+            body.extend_from_slice(b" Tj\n");
+        };
+        if !draws_thai(&text) {
+            tj(body, x, &text);
+            return;
         }
-        body.extend(format!("1 0 0 1 {} {} Tm ", n(x), n(y)).bytes());
-        body.extend(literal(&enc.encode(&text)));
-        body.extend_from_slice(b" Tj\n");
+        let mut pen = x;
+        for (thai, run) in thai_runs(&text) {
+            match thai_outlines(run, pen, y, size) {
+                Some((paths, advance)) if thai => {
+                    outlines.extend(paths);
+                    pen += advance;
+                }
+                _ => {
+                    tj(body, pen, run);
+                    pen += enc.width(run, size);
+                }
+            }
+        }
+    };
+    let wrap = |text: &str, size: f64| {
+        if draws_thai(text) { wrap_thai(text, size, inner_w, width_of) } else { wrap_with(text, size, inner_w, width_of) }
     };
     let x_for = |text: &str, size: f64| -> f64 {
         let tw = width_of(text, size);
@@ -381,7 +493,7 @@ pub fn field_appearance_drawn(doc: &Document, f: &Field, w: &Widget, values: &[S
                 if values.contains(export) {
                     c.push_str(&format!("0.6 0.75 0.86 rg\n{} {} {} {} re f\n", n(bw), n(y - line), n(width - 2.0 * bw), n(line)));
                 }
-                show(&mut body, pad, y - line + size * 0.25, display);
+                show(&mut body, pad, y - line + size * 0.25, display, size);
                 y -= line;
             }
         }
@@ -391,16 +503,16 @@ pub fn field_appearance_drawn(doc: &Document, f: &Field, w: &Widget, values: &[S
                 if size == 0.0 {
                     // Auto size: the largest size (≤ 12) whose wrapped lines fit the height.
                     size = 12.0;
-                    while size > 4.0 && wrap_with(&text, size, inner_w, width_of).len() as f64 * size * 1.15 > height - 2.0 * pad {
+                    while size > 4.0 && wrap(&text, size).len() as f64 * size * 1.15 > height - 2.0 * pad {
                         size -= 0.5;
                     }
                 }
                 let mut y = height - pad - size * 0.85;
-                for line in wrap_with(&text, size, inner_w, width_of) {
+                for line in wrap(&text, size) {
                     if y < -size {
                         break;
                     }
-                    show(&mut body, x_for(&line, size), y, &line);
+                    show(&mut body, x_for(&line, size), y, &line, size);
                     y -= size * 1.15;
                 }
             } else {
@@ -418,10 +530,10 @@ pub fn field_appearance_drawn(doc: &Document, f: &Field, w: &Widget, values: &[S
                     let cell = width / cells as f64;
                     for (i, ch) in text.chars().take(cells).enumerate() {
                         let s = ch.to_string();
-                        show(&mut body, cell * i as f64 + (cell - width_of(&s, size)) / 2.0, y, &s);
+                        show(&mut body, cell * i as f64 + (cell - width_of(&s, size)) / 2.0, y, &s, size);
                     }
                 } else {
-                    show(&mut body, x_for(&text, size), y, &text);
+                    show(&mut body, x_for(&text, size), y, &text, size);
                 }
             }
         }
@@ -441,7 +553,13 @@ pub fn field_appearance_drawn(doc: &Document, f: &Field, w: &Widget, values: &[S
         .bytes(),
     );
     content.extend(body);
-    content.extend_from_slice(b"ET\nQ\nEMC\n");
+    content.extend_from_slice(b"ET\n");
+    if !outlines.is_empty() {
+        // The field's text colour, as a fill.
+        content.extend(format!("{}\n", da.color).bytes());
+        content.extend(outlines);
+    }
+    content.extend_from_slice(b"Q\nEMC\n");
     let mut fonts = Dict::new();
     fonts.set(font_name.into_bytes(), font_obj);
     let mut res = Dict::new();
@@ -587,5 +705,45 @@ mod tests {
         assert_eq!(parse_da("/Cour 9 Tf 0 0 0 1 k").color, "0 0 0 1 k");
         assert_eq!(parse_da("garbage").font, "Helv");
         assert_eq!(stroke_op("1 0 0 rg"), "1 0 0 RG");
+    }
+}
+
+#[cfg(test)]
+mod thai_tests {
+    use super::*;
+
+    #[test]
+    fn thai_runs_split_text_and_keep_marks_with_their_letters() {
+        assert_eq!(thai_runs("ชื่อ น้ำ Test 12๓"), [(true, "ชื่อ"), (false, " "), (true, "น้ำ"), (false, " Test 12"), (true, "๓")]);
+        assert!(thai_runs("").is_empty());
+    }
+
+    #[test]
+    fn thai_is_drawn_as_outlines_and_wraps_between_words() {
+        if pdfcraft_fonts::document_thai_font().is_none() {
+            // Without the face Thai stays with the field's font, reported as before.
+            assert!(!draws_thai("น้ำ") && text_width(&FontText::WinAnsi, "น้ำ", 10.0) == FontText::WinAnsi.width("น้ำ", 10.0));
+            return;
+        }
+        assert!(draws_thai("ชื่อ A") && !draws_thai("Name"));
+        let (paths, advance) = thai_outlines("น้ำใจ", 10.0, 20.0, 12.0).unwrap();
+        let paths = String::from_utf8(paths).unwrap();
+        assert!(
+            paths.starts_with("q 12 0 0 12 10 20 cm\n") && paths.ends_with("f\nQ\n") && paths.contains(" m\n") && !paths.contains("Tj"),
+            "{paths}"
+        );
+        assert!(advance > 12.0 && advance < 60.0, "{advance}");
+        // Width: Thai by its advances, the rest in the field's font.
+        let enc = FontText::WinAnsi;
+        assert!((text_width(&enc, "น้ำใจ AB", 12.0) - (advance + enc.width(" AB", 12.0))).abs() < 1e-9);
+        // Lines end between words, and every line fits.
+        let text = "การพัฒนาซอฟต์แวร์เป็นกระบวนการที่เปิดโอกาสให้นักพัฒนาจากทั่วโลกเข้าร่วม\nบรรทัดสอง";
+        let lines = wrap_thai(text, 12.0, 150.0, |s, size| text_width(&enc, s, size));
+        assert!(lines.len() >= 4 && lines.last().map(String::as_str) == Some("บรรทัดสอง"), "{lines:?}");
+        assert_eq!(lines.concat(), text.replace('\n', ""));
+        for line in &lines {
+            assert!(text_width(&enc, line, 12.0) <= 150.0, "{line}");
+            assert!(!line.starts_with(|c: char| matches!(u32::from(c), 0x0E31 | 0x0E33..=0x0E3A | 0x0E47..=0x0E4E)), "{line}");
+        }
     }
 }
