@@ -296,6 +296,9 @@ impl TextBlock {
                 Some(inherited)
             }
             .unwrap_or(inherited);
+            // A vowel or tone mark is drawn on the letter before it, so it takes that letter's
+            // style: on its own it would be shaped, and placed, apart from the letter.
+            let source = result.last().filter(|_| attaches(*ch)).map_or(source, |(_, prev)| *prev);
             let end = byte.saturating_add(ch.len_utf8());
             if let Some((range, _)) = result.last_mut().filter(|(_, prev)| *prev == source) {
                 range.end = end;
@@ -305,6 +308,12 @@ impl TextBlock {
         }
         result
     }
+}
+
+/// Marks that combine with the letter before them: the general combining diacritics and the
+/// Thai and Lao vowels and tone marks written above or below a consonant.
+fn attaches(c: char) -> bool {
+    matches!(u32::from(c), 0x0300..=0x036F | 0x0E31 | 0x0E34..=0x0E3A | 0x0E47..=0x0E4E | 0x0EB1 | 0x0EB4..=0x0EBC | 0x0EC8..=0x0ECE)
 }
 
 impl TextLine {
@@ -684,16 +693,6 @@ fn interpret(
                 }
                 tm = Matrix([1.0, 0.0, 0.0, 1.0, x_text, 0.0]).then(&tm);
                 let end = tm.then(&ts.ctm).apply(0.0, ts.rise);
-                // The box: from descent to ascent along the run.
-                let corners = [
-                    trm0.apply(0.0, ts.rise + m.descent * ts.size),
-                    trm0.apply(x_text, ts.rise + m.descent * ts.size),
-                    trm0.apply(0.0, ts.rise + m.ascent * ts.size),
-                    trm0.apply(x_text, ts.rise + m.ascent * ts.size),
-                ];
-                let rect = corners
-                    .iter()
-                    .fold([f64::MAX, f64::MAX, f64::MIN, f64::MIN], |b, p| [b[0].min(p.0), b[1].min(p.1), b[2].max(p.0), b[3].max(p.1)]);
                 // A sheared text matrix is an oblique made from an upright face (Chrome slants Thai
                 // this way, having no italic for it): the size is the height across the baseline,
                 // not the length of the slanted axis, and the text is italic.
@@ -701,6 +700,24 @@ fn interpret(
                 let along = a.hypot(b);
                 let (upright, lean) = if along > 0.0 { ((a * d - b * c).abs() / along, (a * c + b * d) / along) } else { (0.0, 0.0) };
                 let oblique = upright > 0.0 && (0.1..=0.7).contains(&(lean / upright));
+                // The box: from descent to ascent along the run. An oblique's box is the box of the
+                // upright text it was made from (it stands over its baseline, as an italic font's
+                // does), so the gap to the next word doesn't depend on how far the text leans.
+                // The rise moves the baseline along the text's own (slanted) axis.
+                let (up_x, up_y) = if oblique { (c - lean * a / along, d - lean * b / along) } else { (c, d) };
+                let corner = |x: f64, height: f64| {
+                    let (bx, by) = trm0.apply(x, ts.rise);
+                    (bx + up_x * height, by + up_y * height)
+                };
+                let corners = [
+                    corner(0.0, m.descent * ts.size),
+                    corner(x_text, m.descent * ts.size),
+                    corner(0.0, m.ascent * ts.size),
+                    corner(x_text, m.ascent * ts.size),
+                ];
+                let rect = corners
+                    .iter()
+                    .fold([f64::MAX, f64::MAX, f64::MIN, f64::MIN], |b, p| [b[0].min(p.0), b[1].min(p.1), b[2].max(p.0), b[3].max(p.1)]);
                 let size_user = if oblique { upright } else { c.hypot(d) } * ts.size;
                 // A numeric-only TJ adjusts the current text matrix but paints no glyphs.
                 // It must not create a phantom editable line or enlarge its neighbours' boxes.

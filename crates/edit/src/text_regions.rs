@@ -145,11 +145,13 @@ fn group_layout_as(lines: &[TextLine], mixed: bool, rules: &[[f64; 4]], by_row: 
         let joins = rows.last().and_then(|r| r.last()).and_then(|i| lines.get(*i)).is_some_and(|prev| {
             let gap = line.rect[0] - prev.rect[2];
             (mixed || same_style(prev, line) || inline_run(prev, line))
-                && (same_plane(prev, line) || !mixed && prev.italic != line.italic && same_direction(prev, line))
+                // An oblique made by shearing stands in the sentence of the upright (or font-slanted)
+                // text beside it.
+                && (same_plane(prev, line) || (prev.italic || line.italic) && same_direction(prev, line))
                 && !ruled_apart(rules, prev.rect, line.rect)
                 && (prev.origin.baseline - line.origin.baseline).abs() < prev.size.min(line.size) * 0.2
                 // A slanted run's box leans over the start of the upright run after it.
-                && gap >= -prev.size.min(line.size) * if !mixed && prev.italic && !line.italic { 0.5 } else { 0.2 }
+                && gap >= -prev.size.min(line.size) * if prev.italic && !same_plane(prev, line) { 0.5 } else { 0.2 }
                 && gap < prev.size.max(line.size) * 1.5
                 // Separate same-style text objects that merely touch or overlap, with no space
                 // between them, are separate labels (for example a paragraph dragged against
@@ -201,7 +203,7 @@ fn group_layout_as(lines: &[TextLine], mixed: bool, rules: &[[f64; 4]], by_row: 
                 };
                 let continues = !mixed && (prev.size - first.size).abs() < 0.01 && (several(prev_row) || several(&row));
                 (mixed || same_style(prev, first) || continues)
-                    && (same_plane(prev, first) || continues && same_direction(prev, first))
+                    && (same_plane(prev, first) || (continues || mixed && (prev.italic || first.italic)) && same_direction(prev, first))
                     && !ruled_below(rules, pr, rect)
                     && aligned
                     && first.size.min(prev.size) >= first.size.max(prev.size) * 0.4
@@ -812,6 +814,15 @@ pub(super) fn rewrite_styled_block(
                 let embolden = source.bold
                     && pdfcraft_fonts::document_thai_font()
                         .is_some_and(|f| pdfcraft_fonts::embedding::face_key(family) == pdfcraft_fonts::embedding::face_key(f.family));
+                // It has no italic either. An italic run set in it leans by shearing its glyphs,
+                // unless the source already slants its text with the matrix.
+                let thai_face = pdfcraft_fonts::document_thai_font()
+                    .is_some_and(|f| pdfcraft_fonts::embedding::face_key(family) == pdfcraft_fonts::embedding::face_key(f.family));
+                let upright = (tm[0] * tm[2] + tm[1] * tm[3]).abs() <= 0.01 * tm[0].hypot(tm[1]) * tm[2].hypot(tm[3]);
+                if thai_face && source.italic && upright {
+                    tm[2] += tm[0] * crate::added::OBLIQUE_SHEAR;
+                    tm[3] += tm[1] * crate::added::OBLIQUE_SHEAR;
+                }
                 let [sr, sg, sb] = overrides.get(&item.1).and_then(|r| r.color).or(style.color).unwrap_or(source.color);
                 let mut properties = Dict::new();
                 properties.set(b"ActualText".to_vec(), Object::String(PdfString::text(&string)));

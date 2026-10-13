@@ -497,6 +497,10 @@ fn font_name(base: &str) -> String {
 /// per 240 distinct glyphs it needs.
 const GLYPHS_PER_FONT: usize = 240;
 
+/// How far an oblique made from an upright face leans: the tangent of 12 degrees, the slant of the
+/// standard oblique fonts.
+pub(crate) const OBLIQUE_SHEAR: f64 = 0.2126;
+
 /// A line of a shaped-text item after layout: its text, whether its paragraph runs right to left,
 /// its pieces in drawing order and its width at the item's size.
 type LaidLine = (String, bool, Vec<Piece>, f64);
@@ -603,7 +607,8 @@ fn draw_laid_shaped(
                             out.extend(format!("/{name} {} Tf ", n(t.size)).bytes());
                             current = Some(name.as_str());
                         }
-                        out.extend(format!("1 0 0 1 {} {} Tm ", n(pen), n(y)).bytes());
+                        // The shaped faces have no italic: an italic item slants their glyphs.
+                        out.extend(format!("1 0 {} 1 {} {} Tm ", n(if t.italic { OBLIQUE_SHEAR } else { 0.0 }), n(pen), n(y)).bytes());
                         out.extend(literal(&[code]));
                         out.extend_from_slice(b" Tj\n");
                         pen += c.advance * t.size + if c.text == " " { tw } else { 0.0 };

@@ -2360,6 +2360,56 @@ fn added_thai_text_wraps_clusters_and_survives_reopen() {
 }
 
 #[test]
+fn an_edited_mark_keeps_the_style_of_its_letter() {
+    // Two source lines. The draft ends with the tone mark the paragraph ended with: matched from
+    // the end it would take the last line's style while its letter takes the first's, and a mark
+    // shaped apart from its letter isn't placed on it.
+    let old = "กิ่งไม้\nปีใหม่";
+    let block = text::TextBlock {
+        text: old.replace('\n', ""),
+        rect: [0.0; 4],
+        base_font: String::new(),
+        size: 12.0,
+        bold: false,
+        italic: false,
+        color: [0.0; 3],
+        rotation: 0.0,
+        lines: vec![0, 1],
+        rows: vec![vec![0], vec![1]],
+        editor_text: old.into(),
+        spans: vec![(0..21, 0), (22..old.len(), 1)],
+        marks: Vec::new(),
+    };
+    assert_eq!(block.edited_spans(old), [(0..21, 0), (21..old.len(), 1)]);
+    let draft = "กิ่งไม้ ที่นี่";
+    assert_eq!(block.edited_spans(draft), [(0..draft.len(), 0)]);
+    // A letter that matches from the end still takes the last line's style, with its marks.
+    let draft = "กิ่งไม้ ที่ใหม่";
+    assert_eq!(block.edited_spans(draft), [(0..31, 0), (31..draft.len(), 1)]);
+}
+
+#[test]
+fn added_italic_thai_text_leans_because_the_thai_face_has_no_italic() {
+    if pdfcraft_fonts::document_thai_font().is_none() {
+        return;
+    }
+    let drawn = |italic: bool| {
+        let mut doc = fixture();
+        let t =
+            AddedText { rect: [20.0, 100.0, 250.0, 300.0], text: "น้ำ ผู้ใช้".into(), size: 16.0, italic, ..AddedText::default() };
+        add_content(&mut doc, 0, &Content::Text(t)).unwrap();
+        String::from_utf8_lossy(&stream_bytes(&doc, &Object::Ref(list_added(&doc)[0].obj)).unwrap()).into_owned()
+    };
+    let (upright, italic) = (drawn(false), drawn(true));
+    assert!(!upright.contains("0.213"), "{upright}");
+    // Every Thai cluster, marks included, is drawn through the same slanted matrix. Latin text
+    // (the space here) is upright in the matrix: its own oblique font leans it.
+    assert_eq!(italic.matches("1 0 0.213 1 ").count(), 4, "{italic}");
+    assert_eq!(italic.matches("Tf 0 Tw 1 0 0 1 ").count(), 1, "{italic}");
+    assert_eq!(italic.matches(" Tm ").count(), upright.matches(" Tm ").count());
+}
+
+#[test]
 fn group_moves_preserve_glyph_bytes_and_unselected_text_state() {
     for content in [
         "BT /F1 12 Tf 1.3 Tc 2 Tw 80 Tz 14 TL 1 0.2 -0.1 1 50 600 Tm (A\\101) Tj 1 0 0 rg (Neighbour) Tj T* (Next) Tj ET",

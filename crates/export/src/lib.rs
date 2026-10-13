@@ -149,7 +149,7 @@ fn is_cell_like(b: &Block) -> bool {
 /// several short blocks, rows are blocks whose vertical spans overlap. Returns the tables and,
 /// per block, whether a table consumed it (so `items` can drop it from the paragraph flow).
 pub(crate) fn tables(blocks: &[Block]) -> (Vec<Table>, Vec<bool>) {
-    let mut consumed = vec![false; blocks.len()];
+    let consumed = vec![false; blocks.len()];
     // Candidate columns: cluster the left edges of cell-like blocks.
     let mut xs: Vec<(f64, usize)> = blocks.iter().enumerate().filter(|(_, b)| is_cell_like(b)).map(|(i, b)| (b.rect[0], i)).collect();
     xs.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -163,7 +163,66 @@ pub(crate) fn tables(blocks: &[Block]) -> (Vec<Table>, Vec<bool>) {
             _ => cols.push((x, vec![i])),
         }
     }
-    let cols: Vec<(f64, Vec<usize>)> = cols.into_iter().filter(|(_, m)| m.len() >= 2).collect();
+    let mut cols: Vec<(f64, Vec<usize>)> = cols.into_iter().filter(|(_, m)| m.len() >= 2).collect();
+    // A column of right-aligned cells (amounts) shares its right edge, not its left. Cluster the
+    // right edges; a cluster whose cells start at different places is such a column. It takes the
+    // cells no left edge placed, and replaces a left-edge column made only of some of its own
+    // cells (amounts of equal length line up on the left too).
+    let mut rights: Vec<(f64, usize)> = blocks.iter().enumerate().filter(|(_, b)| is_cell_like(b)).map(|(i, b)| (b.rect[2], i)).collect();
+    rights.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut right_cols: Vec<(f64, Vec<usize>)> = Vec::new();
+    for (x, i) in rights {
+        match right_cols.last_mut() {
+            Some((e, m)) if (x - *e).abs() <= COL_TOL => {
+                *e = (*e * m.len() as f64 + x) / (m.len() + 1) as f64;
+                m.push(i);
+            }
+            _ => right_cols.push((x, vec![i])),
+        }
+    }
+    // Whether a left-edge column holds each block, and the right-edge cluster being looked at
+    // (its number, from 1), so membership tests stay constant-time on pages with many blocks.
+    let mut placed = vec![false; blocks.len()];
+    for &i in cols.iter().flat_map(|(_, m)| m) {
+        if let Some(p) = placed.get_mut(i) {
+            *p = true;
+        }
+    }
+    let mut cluster = vec![0usize; blocks.len()];
+    for (number, (_, members)) in right_cols.into_iter().enumerate() {
+        let lefts = || members.iter().filter_map(|i| blocks.get(*i)).map(|b| b.rect[0]);
+        let left = lefts().fold(f64::MAX, f64::min);
+        if members.len() < 2 || lefts().fold(f64::MIN, f64::max) - left <= COL_TOL {
+            continue;
+        }
+        for &i in &members {
+            if let Some(c) = cluster.get_mut(i) {
+                *c = number + 1;
+            }
+        }
+        cols.retain(|(_, m)| {
+            let keep = m.len() >= members.len() || !m.iter().all(|i| cluster.get(*i) == Some(&(number + 1)));
+            if !keep {
+                for &i in m {
+                    if let Some(p) = placed.get_mut(i) {
+                        *p = false;
+                    }
+                }
+            }
+            keep
+        });
+        let free: Vec<usize> = members.into_iter().filter(|i| placed.get(*i) == Some(&false)).collect();
+        if free.len() >= 2 {
+            let left = free.iter().filter_map(|i| blocks.get(*i)).map(|b| b.rect[0]).fold(f64::MAX, f64::min);
+            for &i in &free {
+                if let Some(p) = placed.get_mut(i) {
+                    *p = true;
+                }
+            }
+            cols.push((left, free));
+        }
+    }
+    cols.sort_by(|a, b| a.0.total_cmp(&b.0));
     if cols.len() < 2 {
         return (Vec::new(), consumed);
     }
@@ -176,11 +235,48 @@ pub(crate) fn tables(blocks: &[Block]) -> (Vec<Table>, Vec<bool>) {
             }
         }
     }
-    // The column whose edge is within tolerance of `x` (edges are in ascending order).
-    let column_at = |x: f64| -> Option<usize> {
-        let k = cols.partition_point(|(e, _)| *e < x - COL_TOL);
-        cols.get(k).filter(|(e, _)| (*e - x).abs() <= COL_TOL).map(|_| k)
-    };
+    let (found, table_of) = assemble(blocks, &cols, &col_of);
+    // A cell centred in its column (a heading over it) shares neither edge. A table's columns
+    // divide the page halfway between one's cells and the next's; a cell beside the table's rows
+    // that lies wholly inside one division belongs to that column.
+    let mut centred = false;
+    for (ti, table) in found.iter().enumerate() {
+        // Each of the table's columns (an index into `cols`) with the extent of its cells.
+        let mut extents: Vec<(usize, [f64; 2])> = Vec::new();
+        for (i, b) in blocks.iter().enumerate() {
+            let Some(ci) = col_of.get(i).copied().flatten().filter(|_| table_of.get(i) == Some(&Some(ti))) else { continue };
+            match extents.iter_mut().find(|(c, _)| *c == ci) {
+                Some((_, x)) => *x = [x[0].min(b.rect[0]), x[1].max(b.rect[2])],
+                None => extents.push((ci, [b.rect[0], b.rect[2]])),
+            }
+        }
+        extents.sort_by(|a, b| a.1[0].total_cmp(&b.1[0]));
+        for (i, b) in blocks.iter().enumerate() {
+            let near = (b.rect[3] - b.rect[1]) * 2.5;
+            if !is_cell_like(b) || col_of.get(i).copied().flatten().is_some() || b.rect[1] > table.rect[3] + near || b.rect[3] < table.rect[1] - near
+            {
+                continue;
+            }
+            let centre = (b.rect[0] + b.rect[2]) / 2.0;
+            let inside = extents.iter().enumerate().find(|(k, (_, own))| {
+                let left = k.checked_sub(1).and_then(|p| extents.get(p)).map_or(own[0], |(_, prev)| (prev[1] + own[0]) / 2.0);
+                let right = extents.get(k + 1).map_or(own[1], |(_, next)| (own[1] + next[0]) / 2.0);
+                centre >= left && centre <= right && b.rect[0] >= left - COL_TOL && b.rect[2] <= right + COL_TOL
+            });
+            if let (Some((_, (ci, _))), Some(c)) = (inside, col_of.get_mut(i)) {
+                *c = Some(*ci);
+                centred = true;
+            }
+        }
+    }
+    let (found, table_of) = if centred { assemble(blocks, &cols, &col_of) } else { (found, table_of) };
+    (found, table_of.iter().map(Option::is_some).collect())
+}
+
+/// The tables made by the blocks placed in columns: `cols` holds each column's left edge and
+/// `col_of` each block's column. Also returns, per block, the table that took it.
+fn assemble(blocks: &[Block], cols: &[(f64, Vec<usize>)], col_of: &[Option<usize>]) -> (Vec<Table>, Vec<Option<usize>>) {
+    let mut consumed: Vec<Option<usize>> = vec![None; blocks.len()];
     // Assign every cell-like block to its nearest column (within tolerance).
     let mut rows: Vec<Vec<(usize, usize)>> = Vec::new(); // (column index, block index), top to bottom
     let mut order: Vec<usize> = (0..blocks.len()).collect();
@@ -190,7 +286,7 @@ pub(crate) fn tables(blocks: &[Block]) -> (Vec<Table>, Vec<bool>) {
         if !is_cell_like(b) {
             continue;
         }
-        let Some(ci) = column_at(b.rect[0]) else { continue };
+        let Some(ci) = col_of.get(bi).copied().flatten() else { continue };
         let joins = rows
             .last()
             .and_then(|row| row.first())
@@ -210,7 +306,7 @@ pub(crate) fn tables(blocks: &[Block]) -> (Vec<Table>, Vec<bool>) {
     }
     // Runs of consecutive rows that have two or more distinct columns are tables.
     let mut out = Vec::new();
-    let flush = |run: &mut Vec<Vec<(usize, usize)>>, out: &mut Vec<Table>, consumed: &mut Vec<bool>| {
+    let flush = |run: &mut Vec<Vec<(usize, usize)>>, out: &mut Vec<Table>, consumed: &mut Vec<Option<usize>>| {
         if run.len() < 2 {
             run.clear();
             return;
@@ -236,8 +332,10 @@ pub(crate) fn tables(blocks: &[Block]) -> (Vec<Table>, Vec<bool>) {
             }
             for (_ci, bi) in row {
                 let b = &blocks[bi];
-                let Some(slot) = edges.iter().position(|e| (*e - b.rect[0]).abs() <= COL_TOL) else { continue };
-                let span = edges[slot + 1..].iter().filter(|e| **e > b.rect[0] + COL_TOL && **e < b.rect[2] - COL_TOL).count() + 1;
+                // The column's own edge: a centred or right-aligned cell starts to the right of it.
+                let Some(edge) = col_of.get(bi).copied().flatten().and_then(|ci| cols.get(ci)).map(|c| c.0) else { continue };
+                let Some(slot) = edges.iter().position(|e| (*e - edge).abs() <= COL_TOL) else { continue };
+                let span = edges.iter().skip(slot + 1).filter(|e| **e > edge + COL_TOL && **e < b.rect[2] - COL_TOL).count() + 1;
                 let cell = Cell { text: b.text.trim().to_string(), size: b.size, bold: b.bold, italic: b.italic, color: b.color, span };
                 match &mut slots[slot] {
                     Some(c) => {
@@ -246,7 +344,7 @@ pub(crate) fn tables(blocks: &[Block]) -> (Vec<Table>, Vec<bool>) {
                     }
                     None => slots[slot] = Some(cell),
                 }
-                consumed[bi] = true;
+                consumed[bi] = Some(out.len());
             }
             let mut materialized = Vec::with_capacity(ncols);
             let mut column = 0;
@@ -1455,6 +1553,66 @@ mod tests {
             ],
             images: Vec::new(),
         }
+    }
+
+    /// An unruled price list: the headings are centred over their columns and the amounts are
+    /// right-aligned, so neither shares a left edge with the cells under or over it.
+    #[test]
+    fn centred_headings_and_right_aligned_amounts_join_an_unruled_table() {
+        let cell = |t: &str, x0: f64, x1: f64, y: f64| Block {
+            runs: Vec::new(),
+            text: t.into(),
+            rect: [x0, y, x1, y + 14.0],
+            size: 12.0,
+            bold: false,
+            italic: false,
+            color: [0.0; 3],
+            rotation: 0.0,
+        };
+        let page = Page {
+            width: 612.0,
+            height: 792.0,
+            blocks: vec![
+                cell("รายการ", 141.0, 181.0, 620.0),
+                cell("จำนวน", 262.0, 298.0, 620.0),
+                cell("ราคา (บาท)", 396.0, 456.0, 620.0),
+                cell("ข้าวหอมมะลิ", 72.0, 140.0, 590.0),
+                cell("5 กิโลกรัม", 250.0, 310.0, 590.0),
+                cell("250.00", 420.0, 460.0, 590.0),
+                cell("น้ำปลา", 72.0, 110.0, 560.0),
+                cell("2 ขวด", 250.0, 285.0, 560.0),
+                cell("80.00", 427.0, 460.0, 560.0),
+                cell("กาแฟคั่วบดอย่างดี", 72.0, 150.0, 530.0),
+                cell("1 ถุง", 250.0, 278.0, 530.0),
+                cell("1,250.00", 408.0, 460.0, 530.0),
+                // As long as 80.00: the two line up on the left as well, without being a column.
+                cell("น้ำตาลทราย", 72.0, 132.0, 500.0),
+                cell("3 กิโลกรัม", 250.0, 310.0, 500.0),
+                cell("75.50", 427.0, 460.0, 500.0),
+            ],
+            ..Page::default()
+        };
+        let (found, consumed) = tables(&page.blocks);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(consumed.iter().all(|c| *c), "{consumed:?}");
+        let rows: Vec<Vec<&str>> = found[0].rows.iter().map(|r| r.iter().map(|c| c.text.as_str()).collect()).collect();
+        assert_eq!(
+            rows,
+            vec![
+                vec!["รายการ", "จำนวน", "ราคา (บาท)"],
+                vec!["ข้าวหอมมะลิ", "5 กิโลกรัม", "250.00"],
+                vec!["น้ำปลา", "2 ขวด", "80.00"],
+                vec!["กาแฟคั่วบดอย่างดี", "1 ถุง", "1,250.00"],
+                vec!["น้ำตาลทราย", "3 กิโลกรัม", "75.50"],
+            ]
+        );
+        assert!(found[0].rows.iter().flatten().all(|c| c.span == 1), "{:?}", found[0].rows);
+        // A centred line that sits over two columns at once is not forced into either.
+        let mut wide = page.clone();
+        wide.blocks.push(cell("หมายเหตุ ราคารวมภาษีแล้ว", 200.0, 420.0, 470.0));
+        let (found, consumed) = tables(&wide.blocks);
+        assert_eq!(found.len(), 1);
+        assert_eq!(consumed.last(), Some(&false));
     }
 
     #[test]
