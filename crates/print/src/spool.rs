@@ -56,7 +56,20 @@ pub(crate) fn printer_options_via(printer: &str, ppd_dir: &std::path::Path, mut 
 }
 
 pub fn submit(pdf: &[u8], job: &Job) -> Result<String, crate::PrintError> {
-    craft_print::submit(pdf, job).map_err(|e| crate::PrintError::Spool(e.to_string()))
+    craft_print::submit(pdf, &with_scaling(job)).map_err(|e| crate::PrintError::Spool(e.to_string()))
+}
+
+/// The job as sent: an exact-size job also asks for IPP's `print-scaling=none`. CUPS' own
+/// `fit-to-page=false` is not passed to driverless (AirPrint / IPP Everywhere) printers, which
+/// then use their default, `auto`: a sheet as large as the paper is shrunk into the printable
+/// area, so a page printed at 100% comes out smaller, inside a white border. A scaling the
+/// user chose in the driver's own options is kept.
+pub fn with_scaling(job: &Job) -> Job {
+    let mut job = job.clone();
+    if job.scaling == Scaling::Exact && !job.options.iter().any(|(key, _)| key == "print-scaling") {
+        job.options.push(("print-scaling".into(), "none".into()));
+    }
+    job
 }
 
 pub fn open_printer_preferences(printer: &str) -> Result<(), crate::PrintError> {

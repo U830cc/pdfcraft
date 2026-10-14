@@ -619,3 +619,19 @@ fn paper_matching_accepts_rounded_metric_sizes_but_not_custom_or_invalid_sizes()
         assert_eq!(matching_paper(size), None);
     }
 }
+
+#[test]
+fn exact_size_jobs_ask_driverless_printers_not_to_scale() {
+    // A driverless printer's default scaling (`auto`) shrinks a paper-sized sheet into its
+    // printable area: 100% has to say `print-scaling=none` as well as `fit-to-page=false`.
+    let args = lp_args(&spool::with_scaling(&Job { printer: Some("Canon_G3030_series".into()), ..Job::default() }));
+    assert!(args.windows(2).any(|w| w == ["-o", "fit-to-page=false"]), "{args:?}");
+    assert!(args.windows(2).any(|w| w == ["-o", "print-scaling=none"]), "{args:?}");
+    // Once only, and a scaling chosen among the driver's options wins.
+    let chosen = Job { options: vec![("print-scaling".into(), "fill".into())], ..Job::default() };
+    let args = lp_args(&spool::with_scaling(&chosen));
+    assert_eq!(args.iter().filter(|a| a.starts_with("print-scaling=")).collect::<Vec<_>>(), ["print-scaling=fill"]);
+    // Shrink-to-fit jobs are left to the spooler as before.
+    let shrink = Job { scaling: spool::Scaling::ShrinkToFit, ..Job::default() };
+    assert!(!lp_args(&spool::with_scaling(&shrink)).iter().any(|a| a == "print-scaling=none"));
+}
