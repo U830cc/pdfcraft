@@ -111,7 +111,7 @@ impl Default for PrintDraft {
             cut_marks: true,
             orientation: Orientation::Auto,
             content: Content::DocumentAndMarkups,
-            paper: 0,
+            paper: print::DEFAULT_PAPER,
             sheet: 0,
             current_page: 0,
             driver_options: None,
@@ -731,7 +731,7 @@ pub(crate) fn body(
                 });
                 ui.end_row();
                 ui.label(tl!("Paper:"));
-                let paper_name = PAPERS.get(d.paper).map_or("US Letter", |p| p.0);
+                let paper_name = PAPERS.get(d.paper).map_or("A4", |p| p.0);
                 egui::ComboBox::from_id_salt("paper").selected_text(paper_name).width(260.0).show_ui(ui, |ui| {
                     for (i, (name, _)) in PAPERS.iter().enumerate() {
                         ui.selectable_value(&mut d.paper, i, *name);

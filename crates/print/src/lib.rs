@@ -229,11 +229,21 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { pages: Vec::new(), paper: PAPERS[0].1, orientation: Orientation::Auto, layout: Layout::default(), content: Content::default() }
+        Settings {
+            pages: Vec::new(),
+            paper: PAPERS[DEFAULT_PAPER].1,
+            orientation: Orientation::Auto,
+            layout: Layout::default(),
+            content: Content::default(),
+        }
     }
 }
 
 /// Common paper sizes (points, portrait).
+/// The paper a print starts on: A4 (index into [`PAPERS`]), the size used almost everywhere
+/// outside North America.
+pub const DEFAULT_PAPER: usize = 4;
+
 pub const PAPERS: [(&str, (f64, f64)); 18] = [
     ("US Letter", (612.0, 792.0)),
     ("US Legal", (612.0, 1008.0)),

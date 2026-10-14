@@ -111,7 +111,7 @@ impl Automation {
             c => return Err(bad(format!("unknown comments_forms {c:?}"))),
         };
         let paper = match a.opt_str("paper")? {
-            None => PAPERS[0].1,
+            None => PAPERS[print::DEFAULT_PAPER].1,
             Some(p) => PAPERS
                 .iter()
                 .find(|(n, _)| {

@@ -635,3 +635,9 @@ fn exact_size_jobs_ask_driverless_printers_not_to_scale() {
     let shrink = Job { scaling: spool::Scaling::ShrinkToFit, ..Job::default() };
     assert!(!lp_args(&spool::with_scaling(&shrink)).iter().any(|a| a == "print-scaling=none"));
 }
+
+#[test]
+fn printing_starts_on_a4() {
+    assert_eq!(PAPERS[DEFAULT_PAPER].0, "A4");
+    assert_eq!(Settings::default().paper, (595.28, 841.89));
+}
