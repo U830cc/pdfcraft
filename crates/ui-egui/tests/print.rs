@@ -1,5 +1,6 @@
 //! The Print dialog in the real shell (egui_kittest): settings, preview sheets, Save as PDF.
 
+use egui::accesskit::Role;
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use pdfcraft_ui_egui::{Dialog, PdfCraftApp};
@@ -13,6 +14,68 @@ fn harness() -> Harness<'static, PdfCraftApp> {
     });
     h.run_steps(4);
     h
+}
+
+#[test]
+fn current_print_page_saves_the_viewed_page_when_labels_restart() {
+    // Five distinct painted pages, labelled i, ii, iii, 1, 2.
+    let mut objects = vec![
+        "<< /Type /Catalog /Pages 2 0 R /PageLabels << /Nums [0 << /S /r >> 3 << /S /D /St 1 >>] >> >>".to_owned(),
+        "<< /Type /Pages /Kids [3 0 R 5 0 R 7 0 R 9 0 R 11 0 R] /Count 5 /MediaBox [0 0 200 300] >>".to_owned(),
+    ];
+    for (i, color) in ["1 0 0", "0 1 0", "0 0 1", "1 1 0", "1 0 1"].iter().enumerate() {
+        objects.push(format!("<< /Type /Page /Parent 2 0 R /Resources << >> /Contents {} 0 R >>", 4 + i * 2));
+        let content = format!("{color} rg 0 0 200 300 re f");
+        objects.push(format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()));
+    }
+    let mut bytes = b"%PDF-1.7\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, object) in objects.iter().enumerate() {
+        offsets.push(bytes.len());
+        bytes.extend_from_slice(format!("{} 0 obj\n{object}\nendobj\n", i + 1).as_bytes());
+    }
+    let xref = bytes.len();
+    bytes.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes());
+    for offset in offsets {
+        bytes.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    bytes.extend_from_slice(format!("trailer << /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n", objects.len() + 1).as_bytes());
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_| {
+        let mut app = PdfCraftApp::new();
+        app.set_option("language", "en").unwrap();
+        app.open_bytes("labelled.pdf", None, bytes).unwrap();
+        app
+    });
+    h.run_steps(4);
+    let id = h.state().views[0].id;
+    let labels: Vec<_> = h.state().session.get(id).unwrap().info.pages.iter().map(|p| p.label.as_str()).collect();
+    assert_eq!(labels, ["i", "ii", "iii", "1", "2"]);
+    for (current, expected) in [[255, 0, 0], [0, 255, 0]].into_iter().enumerate() {
+        h.state_mut().set_option("page", &(current + 1).to_string()).unwrap();
+        h.run_steps(3);
+        assert!(h.state_mut().execute("print.dialog"));
+        h.run_steps(3);
+        h.get_by_label("Current page").click();
+        h.run_steps(3);
+        assert_eq!(h.state().print_draft.current_page, current);
+        h.get_by_label("Sheet 1 of 1");
+        let out = std::env::temp_dir().join(format!("pdfcraft-print-current-{}-{current}.pdf", std::process::id()));
+        h.state_mut().save_override = Some(out.to_string_lossy().into_owned());
+        h.state_mut().print_draft.printer = None;
+        h.run_steps(1);
+        h.get_by_label("Save as PDF").click();
+        h.run_steps(3);
+        assert_eq!(h.state().dialog, None);
+        let saved = std::sync::Arc::new(std::fs::read(&out).unwrap());
+        std::fs::remove_file(out).unwrap();
+        let doc = pdfcraft_cos::Document::open(saved.clone()).unwrap();
+        assert_eq!(pdfcraft_model::pages(&doc).len(), 1);
+        let mut renderer = pdfcraft_render::PageRenderer::new(saved, Default::default());
+        let shot = renderer.render(pdfcraft_render::RenderRequest { page: 0, scale: 1.0, ..Default::default() });
+        assert!(shot.error.is_none(), "{:?}", shot.error);
+        let center = ((shot.height / 2 * shot.width + shot.width / 2) * 4) as usize;
+        assert_eq!(&shot.rgba[center..center + 3], &expected, "saved the wrong physical page for {current}");
+    }
 }
 
 #[test]
@@ -181,14 +244,17 @@ fn print_dialog_shows_the_printer_driver_options() {
     h.get_by_label("Printer properties");
     h.get_by_label("Media");
     h.get_by_label("Paper tray");
-    assert_eq!(h.state().print_draft.job("form.pdf").options, [("InputSlot".to_string(), "Tray2".to_string())]);
+    // The selected sheet's media (A4, the dialog's default paper) is always sent, independently
+    // of changed driver properties.
+    let media = vec![("media".to_string(), "A4".to_string())];
+    assert_eq!(h.state().print_draft.job("form.pdf").options, [("InputSlot".to_string(), "Tray2".to_string()), media[0].clone()]);
     h.get_by_label("Reset to printer defaults").click();
     h.run_steps(2);
-    assert!(h.state().print_draft.job("form.pdf").options.is_empty(), "defaults are not sent");
+    assert_eq!(h.state().print_draft.job("form.pdf").options, media, "driver defaults are not sent; selected paper is retained");
     // Options read for another printer never go with this one's job.
     h.state_mut().print_draft.driver_choices.insert("InputSlot".into(), "Tray2".into());
     h.state_mut().print_draft.printer = Some("Other_Queue".into());
-    assert!(h.state().print_draft.job("form.pdf").options.is_empty());
+    assert_eq!(h.state().print_draft.job("form.pdf").options, media, "another queue must not inherit driver options");
 }
 
 /// The desktop app lists printers in the background (PowerShell on Windows takes a second or
@@ -215,6 +281,11 @@ fn printers_listed_in_the_background_preselect_the_default_unless_one_was_picked
     assert_eq!(h.state().dialog, Some(Dialog::Print), "the dialog doesn't wait for the printers");
     assert!(h.state().print_draft.printers_loading);
     assert_eq!(h.state().print_draft.printer, None);
+    // Nothing is known yet (#160): the dialog says it is looking, and Print waits instead of
+    // saving a PDF.
+    h.get_by_value("Looking for printers…");
+    assert!(h.get_by_role_and_label(Role::Button, "Print").accesskit_node().is_disabled(), "Print waits for the list");
+    assert!(h.query_by_label("Save as PDF").is_none(), "not offered as the choice while looking");
     drop(hold);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while h.state().print_draft.printers_loading && std::time::Instant::now() < deadline {
@@ -310,4 +381,49 @@ fn a_printer_without_two_sided_printing_points_to_its_properties() {
     h.state_mut().print_draft.printer = Some("Office PS".into());
     h.run_steps(2);
     h.get_by_label_contains(note);
+}
+
+/// Print as image (Acrobat's Advanced Print Setup) is a choice in the Print dialog's Advanced
+/// section: the saved print-ready PDF carries the page as a picture, no text.
+#[test]
+fn print_as_image_is_an_advanced_choice_that_saves_pictures() {
+    let mut h = harness();
+    assert!(h.state_mut().execute("print.dialog"));
+    h.run_steps(3);
+    h.get_by_label("Advanced".to_uppercase().as_str()).click();
+    h.run_steps(2);
+    h.get_by_label("Print as image").click();
+    h.run_steps(2);
+    assert!(h.state().print_draft.as_image);
+    let out = std::env::temp_dir().join(format!("pdfcraft-print-image-test-{}.pdf", std::process::id()));
+    h.state_mut().save_override = Some(out.to_string_lossy().into_owned());
+    h.state_mut().print_draft.printer = None;
+    h.run_steps(1);
+    h.get_by_label("Save as PDF").click();
+    h.run_steps(3);
+    assert_eq!(h.state().dialog, None);
+    let bytes = std::fs::read(&out).expect("saved");
+    let doc = pdfcraft_cos::Document::open(std::sync::Arc::new(bytes)).unwrap();
+    assert_eq!(pdfcraft_model::pages(&doc).len(), 1);
+    let pictures =
+        doc.scan_objects().filter(|(_, o)| matches!(&**o, pdfcraft_cos::Object::Stream(st) if st.dict.name(b"Subtype") == Some(b"Image"))).count();
+    assert_eq!(pictures, 1, "the page is one picture");
+    let _ = std::fs::remove_file(out);
+}
+
+/// The spooler answering with no printers at all says so (#160), and Save as PDF still works.
+#[test]
+fn an_empty_printer_list_says_none_were_found() {
+    use std::sync::Arc;
+    let mut h = harness();
+    h.state_mut().printer_source = Some(Arc::new(Vec::new));
+    assert!(h.state_mut().execute("print.dialog"));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while h.state().print_draft.printers_loading && std::time::Instant::now() < deadline {
+        h.run_steps(1);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    h.run_steps(2);
+    h.get_by_label_contains("No printers were found");
+    assert!(!h.get_by_role_and_label(Role::Button, "Save as PDF").accesskit_node().is_disabled());
 }

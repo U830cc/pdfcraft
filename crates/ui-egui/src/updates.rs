@@ -11,8 +11,9 @@ use egui::{Align, Layout};
 
 use crate::{PdfCraftApp, theme, widgets};
 
-/// Where every PdfCraft release is listed.
-pub const RELEASES_PAGE: &str = "https://github.com/storytold/pdfcraft/releases";
+/// Where every release of this build is listed: the Thai-support fork's own releases, so an
+/// update never replaces it with a build without Thai.
+pub const RELEASES_PAGE: &str = "https://github.com/U830cc/pdfcraft/releases";
 
 /// The latest published release.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -113,7 +114,7 @@ pub(crate) fn dialog(app: &mut PdfCraftApp, ctx: &egui::Context) {
         return;
     }
     let t = theme::Tokens::get(ctx);
-    let current = env!("CARGO_PKG_VERSION");
+    let current = pdfcraft_engine::build_info::VERSION;
     let mut close = false;
     let mut download: Option<String> = None;
     let modal = crate::widgets::show_modal(ctx, "updates", |ui| {

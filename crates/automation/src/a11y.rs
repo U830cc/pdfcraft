@@ -202,7 +202,57 @@ fn review_html(record: &Value) -> Result<String> {
     Ok(html)
 }
 
+/// Tags in one page of `accessibility_tags`, by default and at most.
+const TAG_PAGE: usize = 200;
+const MAX_TAG_PAGE: usize = 1000;
+
 impl Automation {
+    pub(crate) fn accessibility_autotag_apply(&mut self, a: &Args) -> Result<Value> {
+        let id = self.doc(a)?.id;
+        self.session.apply(id, pdfcraft_engine::Edit::AutoTagText).map_err(failed)?;
+        let tags = self.accessibility_tags(a)?;
+        Ok(json!({
+            "tags": tags["tags"], "count": tags["count"],
+            "note": "Text objects were tagged as paragraphs. Review heading roles, reading order and remaining accessibility findings manually.",
+        }))
+    }
+
+    pub(crate) fn accessibility_autotag_form_fields(&mut self, a: &Args) -> Result<Value> {
+        let id = self.doc(a)?.id;
+        self.session.apply(id, pdfcraft_engine::Edit::AutoTagFormFields).map_err(failed)?;
+        let report = self
+            .doc(a)?
+            .accessibility_check(&Options { rules: [Rule::TaggedFormFields].into(), pages: None })
+            .ok_or_else(|| failed("the document can't be read"))?;
+        let result = report.result(Rule::TaggedFormFields).ok_or_else(|| failed("the form field check is unavailable"))?;
+        Ok(
+            json!({ "status": status_id(result.status), "remaining_findings": result.findings.len(), "note": "Only form widgets were tagged. Review text, figures, links, reading order, and other document content separately." }),
+        )
+    }
+
+    pub(crate) fn accessibility_autotag_preview(&self, a: &Args) -> Result<Value> {
+        let page = self.page(a)?;
+        let preview = self.doc(a)?.autotag_preview(page).map_err(failed)?;
+        let candidates: Vec<Value> = preview
+            .candidates
+            .into_iter()
+            .map(|c| {
+                json!({
+                    "type": c.kind, "reason": c.reason, "text": c.text,
+                    "text_truncated": c.text_truncated, "bbox_user_space": c.rect,
+                    "font_size": c.size, "bold": c.bold, "needs_review": true,
+                })
+            })
+            .collect();
+        Ok(json!({
+            "page": page + 1, "candidates": candidates,
+            "unclassified_images": preview.unclassified_images,
+            "unclassified_text_blocks": preview.unclassified_text_blocks,
+            "existing_structure": preview.existing_structure,
+            "note": "Text roles are proposals only. Review images, tables, lists, annotations and existing tags before applying structure.",
+        }))
+    }
+
     fn a11y_options(&self, a: &Args) -> Result<Options> {
         let mut o = Options::default();
         if a.opt_bool("all")?.unwrap_or(false) {
@@ -234,6 +284,14 @@ impl Automation {
         let o = self.a11y_options(a)?;
         let r = self.doc(a)?.accessibility_check(&o).ok_or_else(|| failed("the document can't be read for checking"))?;
         Ok(report_json(&r))
+    }
+
+    /// Report only untagged page content, annotations, and AcroForm widgets.
+    pub(crate) fn a11y_find_untagged(&self, a: &Args) -> Result<Value> {
+        let pages = a.opt_ints("pages")?.map(|_| self.pages(a, "pages")).transpose()?;
+        let rules = [Rule::TaggedContent, Rule::TaggedAnnotations, Rule::TaggedFormFields].into_iter().collect();
+        let report = self.doc(a)?.accessibility_check(&Options { rules, pages }).ok_or_else(|| failed("the document can't be read for checking"))?;
+        Ok(report_json(&report))
     }
 
     pub(crate) fn a11y_report(&self, a: &Args) -> Result<Value> {
@@ -408,11 +466,39 @@ impl Automation {
         self.accessibility_figures(a)
     }
 
+    /// The structure tags, one page at a time (`offset`, `limit`), optionally only some types, pages
+    /// (1-based) or depths. `count` is how many match; `next` is where the following page starts.
     pub(crate) fn accessibility_tags(&self, a: &Args) -> Result<Value> {
-        let tags: Vec<Value> = self
+        let offset = usize::try_from(a.opt_int("offset")?.unwrap_or(0)).map_err(|_| ToolError::InvalidArgs("offset must be 0 or more".into()))?;
+        let limit = a.opt_int("limit")?.unwrap_or(TAG_PAGE as i64);
+        let limit = usize::try_from(limit)
+            .ok()
+            .filter(|l| (1..=MAX_TAG_PAGE).contains(l))
+            .ok_or_else(|| ToolError::InvalidArgs(format!("limit must be from 1 to {MAX_TAG_PAGE}")))?;
+        let types: Option<Vec<&str>> = a.get("types").map(|_| a.strs("types")).transpose()?;
+        let pages: Option<Vec<usize>> = a
+            .opt_ints("pages")?
+            .map(|p| p.into_iter().map(|n| usize::try_from(n).ok().filter(|n| *n >= 1).map(|n| n - 1)).collect::<Option<Vec<_>>>())
+            .map(|p| p.ok_or_else(|| ToolError::InvalidArgs("pages must be 1-based page numbers".into())))
+            .transpose()?;
+        let max_depth = a
+            .opt_int("max_depth")?
+            .map(|d| usize::try_from(d).map_err(|_| ToolError::InvalidArgs("max_depth must be 0 or more".into())))
+            .transpose()?;
+        let matching: Vec<_> = self
             .doc(a)?
             .tags()
             .into_iter()
+            .filter(|t| types.as_ref().is_none_or(|ty| ty.contains(&t.kind.as_str())))
+            .filter(|t| pages.as_ref().is_none_or(|p| t.page.is_some_and(|page| p.contains(&page))))
+            .filter(|t| max_depth.is_none_or(|d| t.depth <= d))
+            .collect();
+        let count = matching.len();
+        let next = offset.checked_add(limit).filter(|n| *n < count);
+        let tags: Vec<Value> = matching
+            .into_iter()
+            .skip(offset)
+            .take(limit)
             .map(|t| {
                 json!({
                     "object": t.object.num, "generation": t.object.generation, "type": t.kind,
@@ -422,7 +508,17 @@ impl Automation {
                 })
             })
             .collect();
-        Ok(json!({ "count": tags.len(), "tags": tags }))
+        Ok(json!({ "count": count, "tags": tags, "next": next }))
+    }
+
+    pub(crate) fn accessibility_tag_content(&self, a: &Args) -> Result<Value> {
+        let object = u32::try_from(a.int("object")?).map_err(|_| ToolError::InvalidArgs("object must be a positive tag object number".into()))?;
+        let generation =
+            u16::try_from(a.int("generation")?).map_err(|_| ToolError::InvalidArgs("generation must be a PDF object generation".into()))?;
+        let content = self.doc(a)?.tag_content(pdfcraft_cos::ObjRef { num: object, generation }).map_err(failed)?;
+        Ok(
+            json!({ "count": content.len(), "content": content.into_iter().map(|item| json!({ "page": item.page.map(|p| p + 1), "mcid": item.mcid, "text": item.text })).collect::<Vec<_>>() }),
+        )
     }
 
     pub(crate) fn accessibility_set_tag_property(&mut self, a: &Args) -> Result<Value> {
@@ -440,6 +536,18 @@ impl Automation {
         self.session
             .apply(id, pdfcraft_engine::Edit::SetTagProperty { object: pdfcraft_cos::ObjRef::new(object, generation), property, value })
             .map_err(failed)?;
+        self.accessibility_tags(a)
+    }
+
+    pub(crate) fn accessibility_mark_tag_artifact(&mut self, a: &Args) -> Result<Value> {
+        let object = u32::try_from(a.int("object")?).map_err(|_| ToolError::InvalidArgs("object must be a positive tag object number".into()))?;
+        if object == 0 {
+            return Err(ToolError::InvalidArgs("object must be a positive tag object number".into()));
+        }
+        let generation = u16::try_from(a.int("generation")?)
+            .map_err(|_| ToolError::InvalidArgs("generation must be a PDF object generation from accessibility_tags".into()))?;
+        let id = self.doc(a)?.id;
+        self.session.apply(id, pdfcraft_engine::Edit::MarkTagArtifact { object: pdfcraft_cos::ObjRef::new(object, generation) }).map_err(failed)?;
         self.accessibility_tags(a)
     }
 
@@ -467,7 +575,7 @@ impl Automation {
 }
 
 impl Automation {
-    fn ocr_settings(&self, a: &Args) -> Result<pdfcraft_engine::ocr::OcrSettings> {
+    pub(crate) fn ocr_settings(&self, a: &Args) -> Result<pdfcraft_engine::ocr::OcrSettings> {
         let mut settings = pdfcraft_engine::ocr::OcrSettings::default();
         if let Some(d) = a.opt_num("dpi")? {
             settings.dpi = d.clamp(72.0, 600.0) as f32;
@@ -491,7 +599,7 @@ impl Automation {
         // other tools (the write check passes missing files, which stay per-file errors below).
         let paths = a.strs("paths")?;
         for p in &paths {
-            self.resolve(p, true)?;
+            self.resolve_for(p, crate::file_access::Access::Read, true)?;
         }
         std::fs::create_dir_all(&folder).map_err(|e| failed(e.to_string()))?;
         let ocr = pdfcraft_engine::ocr::engine().map_err(failed)?;
@@ -602,9 +710,19 @@ impl Automation {
         let ext = path.extension().map(|e| e.to_string_lossy().into_owned()).unwrap_or_default();
         let format = pdfcraft_engine::compare::OfficeFormat::from_extension(&ext)
             .ok_or_else(|| ToolError::InvalidArgs(format!("unsupported extension {ext:?} (docx, pptx, html or rtf)")))?;
-        let bytes = self.doc_to_copy(a)?.export_office(format);
-        write_atomic(&path, &bytes)?;
-        Ok(json!({ "path": path.to_string_lossy(), "bytes": bytes.len(), "format": format.extension() }))
+        let export = self.doc_to_copy(a)?.export_office_checked(format);
+        write_atomic(&path, &export.bytes)?;
+        // Text left out to keep a hostile page bounded is said, not silent (#3120).
+        let truncated: Vec<usize> = export.truncated_pages.iter().map(|p| p.saturating_add(1)).collect();
+        let mut out = json!({ "path": path.to_string_lossy(), "bytes": export.bytes.len(), "format": format.extension(),
+            "truncated": !truncated.is_empty(), "truncated_pages": truncated });
+        if !export.truncated_pages.is_empty() {
+            use pdfcraft_engine::compare::{MAX_FORM_DEPTH, MAX_FORM_VISITS};
+            out["warnings"] = json!([format!(
+                "forms nested more than {MAX_FORM_DEPTH} deep, or past the first {MAX_FORM_VISITS} forms of a page (forms the page draws itself count too), were left out on the pages in truncated_pages: their text and images are missing from the export, although the viewer may still show them"
+            )]);
+        }
+        Ok(out)
     }
 
     fn pdfa_level(&self, a: &Args) -> Result<pdfcraft_engine::pdfa::Level> {
@@ -626,6 +744,56 @@ impl Automation {
             "compliant": issues.is_empty(),
             "issues": issues,
             "declared": { "pdfa": d.pdfa.map(|(p, c)| format!("PDF/A-{p}{}", c.to_lowercase())), "pdfua": d.pdfua, "output_intents": d.output_intents },
+        }))
+    }
+
+    pub(crate) fn print_readiness(&self, a: &Args) -> Result<Value> {
+        let report = self.doc(a)?.print_readiness();
+        let findings: Vec<Value> =
+            report.findings.iter().map(|f| json!({ "id": f.id, "severity": f.severity, "message": f.message, "page": f.page })).collect();
+        let pages: Vec<Value> = report
+            .pages
+            .iter()
+            .map(|p| {
+                json!({
+                    "page": p.page,
+                    "media_mm": p.media_mm,
+                    "crop_mm": p.crop_mm,
+                    "trim_mm": p.trim_mm,
+                    "bleed_mm": p.bleed_mm,
+                    "trim_set": p.trim_set,
+                    "bleed_set": p.bleed_set,
+                    "bleed_margin_mm": p.bleed_margin_mm,
+                })
+            })
+            .collect();
+        let images: Vec<Value> = report
+            .images
+            .iter()
+            .map(|image| {
+                json!({
+                    "page": image.page,
+                    "name": image.name,
+                    "ppi": image.ppi,
+                    "pixels": image.pixels,
+                    "size_mm": image.size_mm,
+                })
+            })
+            .collect();
+        let pdfa: Vec<Value> = report
+            .pdfa_issues
+            .iter()
+            .map(|issue| json!({ "clause": issue.clause, "message": issue.message, "page": issue.page.map(|p| p + 1) }))
+            .collect();
+        Ok(json!({
+            "text": report.text(),
+            "findings": findings,
+            "pages": pages,
+            "images": images,
+            "output_intents": report.output_intents,
+            "fonts_not_embedded": report.fonts_not_embedded,
+            "pdfa_issues": pdfa,
+            "resolution_unknown": report.resolution_unknown,
         }))
     }
 
@@ -760,11 +928,16 @@ impl Automation {
         let list: Vec<Value> = found
             .iter()
             .map(|(p, c)| {
-                let kind = match c.kind {
-                    pdfcraft_engine::detect::Kind::Text => "text",
-                    pdfcraft_engine::detect::Kind::CheckBox => "checkbox",
+                let (kind, comb) = match c.kind {
+                    pdfcraft_engine::detect::Kind::Text => ("text", None),
+                    pdfcraft_engine::detect::Kind::CheckBox => ("checkbox", None),
+                    pdfcraft_engine::detect::Kind::Comb { cells } => ("text", Some(cells)),
                 };
-                json!({ "page": p + 1, "kind": kind, "name": c.name, "rect": c.rect.map(|v| (v * 100.0).round() / 100.0) })
+                let mut v = json!({ "page": p + 1, "kind": kind, "name": c.name, "rect": c.rect.map(|v| (v * 100.0).round() / 100.0) });
+                if let Some(cells) = comb {
+                    v["comb"] = json!(cells);
+                }
+                v
             })
             .collect();
         if a.opt_bool("add")?.unwrap_or(true) && !found.is_empty() {

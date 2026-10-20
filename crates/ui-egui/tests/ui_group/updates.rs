@@ -9,7 +9,7 @@ use pdfcraft_ui_egui::updates::{Release, UpdateSource, is_newer};
 
 fn source(answer: Result<&str, &str>) -> UpdateSource {
     let answer = answer.map(str::to_string).map_err(str::to_string);
-    Arc::new(move || answer.clone().map(|v| Release { url: format!("https://github.com/storytold/pdfcraft/releases/tag/{v}"), version: v }))
+    Arc::new(move || answer.clone().map(|v| Release { url: format!("https://github.com/U830cc/pdfcraft/releases/tag/{v}"), version: v }))
 }
 
 fn harness(answer: Result<&str, &str>) -> Harness<'static, PdfCraftApp> {
@@ -21,13 +21,17 @@ fn harness(answer: Result<&str, &str>) -> Harness<'static, PdfCraftApp> {
     })
 }
 
-/// Run frames until the background check has reported (or give up).
+/// Run frames until the background check has reported. By what the dialog shows, with the
+/// same 30-second deadline as `support::wait_until`, not for a fixed second: under load the
+/// check's thread can take longer (#1277).
 fn settle(h: &mut Harness<'static, PdfCraftApp>) {
-    for _ in 0..200 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
         h.run_steps(2);
         if h.query_by_label_contains("Checking for a newer version").is_none() {
             break;
         }
+        assert!(std::time::Instant::now() < deadline, "timed out waiting for the update check");
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
     h.run_steps(2);
@@ -85,7 +89,7 @@ fn nothing_is_asked_until_the_user_checks() {
         let counted = counted.clone();
         app.update_source = Some(Arc::new(move || {
             counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Ok(Release { version: "v99.0.0".into(), url: "https://github.com/storytold/pdfcraft/releases/tag/v99.0.0".into() })
+            Ok(Release { version: "v99.0.0".into(), url: "https://github.com/U830cc/pdfcraft/releases/tag/v99.0.0".into() })
         }));
         app
     });

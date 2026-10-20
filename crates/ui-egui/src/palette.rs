@@ -109,6 +109,24 @@ pub fn show(app: &mut PdfCraftApp, ctx: &egui::Context) {
     }
     hits.sort_by_key(|(s, h)| (*s, !h.ready));
     hits.truncate(12);
+    let (down, up) = ctx.input(|i| (i.key_pressed(egui::Key::ArrowDown), i.key_pressed(egui::Key::ArrowUp)));
+    let selected = ctx.data_mut(|data| {
+        let id = egui::Id::new("palette_selected");
+        let query_id = egui::Id::new("palette_selected_query");
+        let previous_query = data.get_temp::<String>(query_id);
+        let selected =
+            if previous_query.as_deref() == Some(&q) { data.get_temp::<usize>(id).unwrap_or(0) } else { 0 }.min(hits.len().saturating_sub(1));
+        data.insert_temp(query_id, q.clone());
+        let selected = if down {
+            selected.saturating_add(1).min(hits.len().saturating_sub(1))
+        } else if up {
+            selected.saturating_sub(1)
+        } else {
+            selected
+        };
+        data.insert_temp(id, selected);
+        selected
+    });
 
     let screen = ctx.content_rect();
 
@@ -141,21 +159,23 @@ pub fn show(app: &mut PdfCraftApp, ctx: &egui::Context) {
                             .font(theme::regular(15.0))
                             .desired_width(f32::INFINITY),
                     );
-                    // Enter runs the top hit. The field keeps focus (requested every frame), so
-                    // check while it is focused as well as when focus is lost.
+                    // Enter runs the selected hit while the field is focused or relinquishing focus.
                     if (r.has_focus() || r.lost_focus())
                         && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                        && let Some((_, h)) = hits.first()
+                        && let Some((_, h)) = hits.get(selected)
                     {
                         chosen = Some((h.command, h.group));
                     }
-                    r.request_focus();
+                    // Re-requesting existing focus interrupts native IME composition.
+                    if !r.has_focus() {
+                        r.request_focus();
+                    }
                 });
                 ui.separator();
-                for (_, h) in &hits {
+                for (index, (_, h)) in hits.iter().enumerate() {
                     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::click());
                     let press = theme::Press::track(ui, &resp);
-                    press.wash(ui, rect, 6, false);
+                    press.wash(ui, rect, 6, index == selected);
                     let body = rect.translate(press.offset());
                     icons::paint(ui, Rect::from_min_size(body.min + vec2(8.0, 9.0), vec2(18.0, 18.0)), h.icon, 17.0, t.icon);
                     // Display is translated; matching above already considered both languages.

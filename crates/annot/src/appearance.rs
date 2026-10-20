@@ -174,7 +174,7 @@ fn interior_color(d: &Dict, fallback: Option<Rgb>) -> Option<Rgb> {
     color(d, b"IC").flatten().or(fallback)
 }
 
-fn border_width(d: &Dict) -> f64 {
+pub(crate) fn border_width(d: &Dict) -> f64 {
     if let Some(w) = d.get(b"BS").and_then(|b| b.as_dict()).and_then(|b| b.get(b"W")).and_then(|w| w.as_f64()) {
         return w.max(0.0);
     }
@@ -262,6 +262,17 @@ fn form(bbox: [f64; 4], content: &[u8], resources: Dict) -> Stream {
 /// when the signature is added to a turned page): 0, 90, 180 or 270.
 pub(crate) fn picture_turn(d: &Dict) -> i64 {
     d.get(b"PCPictureRotate").and_then(Object::as_int).unwrap_or(0).rem_euclid(360) / 90 * 90
+}
+
+/// The page `/Rotate` a rubber stamp's label is turned back by (`/PCStampRotate`).
+fn stamp_turn(d: &Dict) -> i64 {
+    d.get(b"PCStampRotate").and_then(Object::as_int).unwrap_or(0).rem_euclid(360) / 90 * 90
+}
+
+/// The page `/Rotate` a text box's or Fill & Sign text's lines are turned back by
+/// (`/PCTextRotate`, written when it is added to a turned page).
+fn text_turn(d: &Dict) -> i64 {
+    d.get(b"PCTextRotate").and_then(Object::as_int).unwrap_or(0).rem_euclid(360) / 90 * 90
 }
 
 /// The first text [`build`] would draw in the standard fonts (Helvetica, WinAnsiEncoding) that
@@ -632,7 +643,26 @@ pub fn build(d: &Dict) -> Option<Stream> {
                     }
                     let kind = crate::StampKind::from_name(other)?;
                     let by = d.get(b"PCByLine").and_then(|o| o.as_string()).map(PdfString::to_text);
-                    return Some(stamp(kind, rect, stroke.unwrap_or(kind.color()), by.as_deref(), opacity, res));
+                    let turn = stamp_turn(d);
+                    let draw = if turn == 0 {
+                        rect
+                    } else {
+                        let (rw, rh) = (rect[2] - rect[0], rect[3] - rect[1]);
+                        let (dw, dh) = if matches!(turn, 90 | 270) { (rh, rw) } else { (rw, rh) };
+                        if dw < 1.0 || dh < 1.0 {
+                            return None;
+                        }
+                        [0.0, 0.0, dw, dh]
+                    };
+                    let mut stream = stamp(kind, draw, stroke.unwrap_or(kind.color()), by.as_deref(), opacity, res);
+                    if turn != 0 {
+                        // Upright in the stamp's displayed box, then mapped into `/Rect` the way
+                        // the page maps display space into user space. Viewers fit that box to
+                        // `/Rect`; the page rotation then shows the label the right way up.
+                        let m = pdfcraft_model::view_matrix_for(turn, rect);
+                        stream.dict.set(b"Matrix".to_vec(), Object::Array(m.iter().copied().map(Object::Real).collect()));
+                    }
+                    return Some(stream);
                 }
             }
         }
@@ -642,6 +672,19 @@ pub fn build(d: &Dict) -> Option<Stream> {
             let bw = if d.contains(b"BS") || d.contains(b"Border") { border_width(d) } else { 0.0 };
             // A callout: the leader line (arrowhead at its first point), and the text box inside
             // `/Rect` by `/RD`.
+            // Text added to a turned page is drawn upright in its displayed box, which the form
+            // `/Matrix` then maps into `/Rect` (as for stamps). Callouts keep user-space axes.
+            let turn = if d.contains(b"CL") { 0 } else { text_turn(d) };
+            let (rect, matrix) = if turn == 0 {
+                (rect, None)
+            } else {
+                let (rw, rh) = (rect[2] - rect[0], rect[3] - rect[1]);
+                let (dw, dh) = if matches!(turn, 90 | 270) { (rh, rw) } else { (rw, rh) };
+                if dw < 1.0 || dh < 1.0 {
+                    return None;
+                }
+                ([0.0, 0.0, dw, dh], Some(pdfcraft_model::view_matrix_for(turn, rect)))
+            };
             let full = rect;
             let mut rect = rect;
             if d.contains(b"CL") {
@@ -727,7 +770,11 @@ pub fn build(d: &Dict) -> Option<Stream> {
             let mut fonts = Dict::new();
             fonts.set(b"Helv".to_vec(), Object::Dict(font));
             res.set(b"Font".to_vec(), Object::Dict(fonts));
-            return Some(form(full, &out, res));
+            let mut stream = form(full, &out, res);
+            if let Some(m) = matrix {
+                stream.dict.set(b"Matrix".to_vec(), Object::Array(m.iter().copied().map(Object::Real).collect()));
+            }
+            return Some(stream);
         }
         _ => return None,
     }
