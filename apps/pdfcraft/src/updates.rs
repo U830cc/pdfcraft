@@ -12,7 +12,7 @@ const LATEST: &str = "https://api.github.com/repos/U830cc/pdfcraft/releases/late
 pub fn latest_release() -> Result<Release, String> {
     let agent = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(10)))
-        .tls_config(ureq::tls::TlsConfig::builder().root_certs(os_roots()?).build())
+        .tls_config(ureq::tls::TlsConfig::builder().root_certs(ureq::tls::RootCerts::PlatformVerifier).build())
         .build()
         .new_agent();
     let mut response = agent
@@ -38,15 +38,10 @@ pub fn latest_release() -> Result<Release, String> {
     parse(&body)
 }
 
-/// The certificate authorities the operating system trusts.
-fn os_roots() -> Result<ureq::tls::RootCerts, String> {
-    let found = rustls_native_certs::load_native_certs();
-    let certs: Vec<ureq::tls::Certificate<'static>> = found.certs.iter().map(|c| ureq::tls::Certificate::from_der(c.as_ref()).to_owned()).collect();
-    if certs.is_empty() {
-        return Err("no trusted certificates found on this system".into());
-    }
-    Ok(ureq::tls::RootCerts::new_with_certs(&certs))
-}
+// The operating system checks GitHub's certificate as its own browser would. Reading its root
+// store instead fails on Windows, which fetches root certificates on first use: a root no
+// Windows program has asked for yet is missing, and the check failed with "invalid peer
+// certificate: UnknownIssuer".
 
 /// The current Unix time in seconds (0 when the clock gives nothing usable).
 fn now_unix() -> u64 {

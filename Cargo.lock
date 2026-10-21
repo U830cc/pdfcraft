@@ -4004,7 +4004,6 @@ dependencies = [
  "pdfcraft-ui-egui",
  "pollster 1.0.1",
  "raw-window-handle",
- "rustls-native-certs",
  "serde_json",
  "uds_windows",
  "ureq",
@@ -6944,6 +6943,7 @@ dependencies = [
  "percent-encoding",
  "rustls",
  "rustls-pki-types",
+ "rustls-platform-verifier",
  "ureq-proto",
  "utf8-zero",
 ]
