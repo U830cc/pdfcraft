@@ -16,6 +16,11 @@ pub use pdfcraft_fonts::{helvetica_width as text_width, wrap};
 
 use crate::{NOTE_SIZE, Rgb, n};
 
+mod symbols;
+
+pub(crate) use symbols::display_stamp;
+use symbols::{CAPTION_SIZE, attach_icon, ellipse, line_caption, line_layout, note_icon, stamp};
+
 /// Length of an arrowhead for a line of width `w`.
 pub fn arrow_size(w: f64) -> f64 {
     6.0 + 3.0 * w.max(0.0)
@@ -120,12 +125,18 @@ fn smooth_curve(pts: &[(f64, f64)]) -> String {
     smooth_segments(pts).iter().map(|[a, b, e]| format!("{} {} {} {} {} {} c\n", n(a.0), n(a.1), n(b.0), n(b.1), n(e.0), n(e.1))).collect()
 }
 
+/// Bumps one cloudy outline draws at most (plus one per edge); past it the bumps grow.
+pub(crate) const MAX_CLOUD_BUMPS: usize = 20_000;
+
 /// A closed cloudy outline through `pts` (§12.5.4 `/BE /S /C`): each edge becomes a row of
 /// half-circle bumps of about `r`, bulging outwards.
 pub fn cloud_path(pts: &[(f64, f64)], r: f64) -> String {
     let area: f64 = pts.iter().zip(pts.iter().cycle().skip(1)).map(|(a, b)| a.0 * b.1 - b.0 * a.1).sum();
     // Outward normal of an edge: to the right of travel for counter-clockwise outlines.
     let sign = if area >= 0.0 { 1.0 } else { -1.0 };
+    let perimeter: f64 = pts.iter().zip(pts.iter().cycle().skip(1)).map(|(a, b)| (b.0 - a.0).hypot(b.1 - a.1)).sum();
+    // Each edge rounds to at least one bump, so the total stays within the budget plus one per edge.
+    let r = r.max(perimeter / (2.0 * MAX_CLOUD_BUMPS as f64));
     let mut c = String::new();
     for (i, (a, b)) in pts.iter().zip(pts.iter().cycle().skip(1)).enumerate() {
         let (dx, dy) = (b.0 - a.0, b.1 - a.1);
@@ -174,23 +185,42 @@ fn interior_color(d: &Dict, fallback: Option<Rgb>) -> Option<Rgb> {
     color(d, b"IC").flatten().or(fallback)
 }
 
+/// The border width (ISO 32000-2 §12.5.4): `/BS /W` when there is a border style dictionary, which
+/// makes `/Border` ignored (Table 166), else the third element of `/Border [hr vr w [dash]]`, read
+/// whether or not the optional fourth element, a dash array, follows. 1 when neither says, and
+/// when the number given is negative or not finite.
 pub(crate) fn border_width(d: &Dict) -> f64 {
-    if let Some(w) = d.get(b"BS").and_then(|b| b.as_dict()).and_then(|b| b.get(b"W")).and_then(|w| w.as_f64()) {
-        return w.max(0.0);
-    }
-    match nums(d, b"Border") {
-        Some(b) if b.len() >= 3 => b[2].max(0.0),
-        _ => 1.0,
-    }
+    let width = match d.get(b"BS").and_then(Object::as_dict) {
+        Some(bs) => bs.get(b"W").and_then(Object::as_f64),
+        None => d.get(b"Border").and_then(Object::as_array).and_then(|b| b.get(2)).and_then(Object::as_f64),
+    };
+    width.filter(|w| w.is_finite() && *w >= 0.0).unwrap_or(1.0)
 }
 
-/// Dash pattern operator for a dashed border, if any.
+/// Elements a dash array may have before it is drawn solid instead: the lengths are written into
+/// the appearance as they are, so a file can't make it arbitrarily large.
+const MAX_DASH: usize = 64;
+
+/// A dash array (§8.4.3.6) as drawn: every element finite and non-negative, not all zero (that
+/// pattern is invalid) and at most [`MAX_DASH`] long. `None` for anything else, which is drawn solid.
+fn dash_array(o: &Object) -> Option<Vec<f64>> {
+    let a = o.as_array().filter(|a| !a.is_empty() && a.len() <= MAX_DASH)?;
+    let v: Vec<f64> = a.iter().map(Object::as_f64).collect::<Option<_>>()?;
+    (v.iter().all(|x| x.is_finite() && *x >= 0.0) && v.iter().any(|x| *x > 0.0)).then_some(v)
+}
+
+/// Dash pattern operator for a dashed border, if any: `/BS /S /D` with its `/D` (default `[3]`,
+/// Table 168), or, without `/BS`, the dash array that may follow the width in `/Border` (Table 166).
 fn dash(d: &Dict) -> String {
-    let Some(bs) = d.get(b"BS").and_then(|b| b.as_dict()) else { return String::new() };
-    if bs.name(b"S") != Some(b"D") {
-        return String::new();
-    }
-    let arr = nums(bs, b"D").filter(|a| !a.is_empty() && a.iter().all(|x| *x >= 0.0)).unwrap_or_else(|| vec![3.0]);
+    let arr = match d.get(b"BS").and_then(Object::as_dict) {
+        Some(bs) if bs.name(b"S") != Some(b"D") => return String::new(),
+        Some(bs) => match bs.get(b"D") {
+            None => Some(vec![3.0]),
+            Some(o) => dash_array(o),
+        },
+        None => d.get(b"Border").and_then(Object::as_array).and_then(|b| b.get(3)).and_then(dash_array),
+    };
+    let Some(arr) = arr else { return String::new() };
     format!("[{}] 0 d\n", arr.iter().map(|x| n(*x)).collect::<Vec<_>>().join(" "))
 }
 
@@ -277,13 +307,14 @@ fn text_turn(d: &Dict) -> i64 {
 
 /// The first text [`build`] would draw in the standard fonts (Helvetica, WinAnsiEncoding) that
 /// they can't, which would come out as `?`: what it is (for the message) and the character. The
-/// text of a text box, callout or Fill & Sign text, a measurement's label, a dynamic stamp's
-/// "By …" line, and a redaction mark's overlay text (drawn when it is applied). `None` when all of
+/// text of a text box, callout or Fill & Sign text, a line's caption, a measurement's label, a
+/// dynamic stamp's "By …" line, and a redaction mark's overlay text (drawn when it is applied). `None` when all of
 /// it can be drawn.
 pub fn undrawable_text(d: &Dict) -> Option<(&'static str, char)> {
     let text = |key: &[u8]| d.get(key).and_then(Object::as_string).map(PdfString::to_text);
     let (what, text) = match d.name(b"Subtype")? {
         b"FreeText" => ("the comment's text", text(b"Contents")?),
+        b"Line" if !d.contains(b"PCMeasureValue") => ("the line's caption", line_caption(d)?),
         b"Line" | b"PolyLine" | b"Polygon" => ("the measurement label", text(b"PCMeasureValue")?),
         b"Stamp" if matches!(d.get(b"PCStamp"), Some(Object::Bool(true))) => ("the stamp's \"By\" line", text(b"PCByLine")?),
         // Drawn in Helvetica when the redaction is applied: refused when it is marked.
@@ -291,6 +322,55 @@ pub fn undrawable_text(d: &Dict) -> Option<(&'static str, char)> {
         _ => return None,
     };
     Some((what, first_undrawable(&text)?))
+}
+
+/// `/Font` resources naming `/Helv`: standard Helvetica with WinAnsiEncoding.
+fn helvetica_resource() -> Object {
+    let mut font = Dict::new();
+    font.set(b"Type".to_vec(), Object::name("Font"));
+    font.set(b"Subtype".to_vec(), Object::name("Type1"));
+    font.set(b"BaseFont".to_vec(), Object::name("Helvetica"));
+    font.set(b"Encoding".to_vec(), Object::name("WinAnsiEncoding"));
+    let mut fonts = Dict::new();
+    fonts.set(b"Helv".to_vec(), Object::Dict(font));
+    Object::Dict(fonts)
+}
+
+/// Where a caret and its paragraph symbol go within `rect`: the box the caret is drawn in, and for
+/// `/Sy /P` the symbol's baseline origin and font size (ISO 32000-2 Table 183).
+///
+/// The caret lies within `/Rect` less `/RD` (left, top, right, bottom), when `/RD` is four finite,
+/// non-negative numbers that leave a box; otherwise within `/Rect`. The ¶ sits to the right of the
+/// caret, its height a little over half the caret's, in the room `/RD` leaves on the right; when
+/// that is too narrow, the caret gives up to half its width and the symbol shrinks to what is left,
+/// so both stay inside `/Rect` (the form's `/BBox`).
+fn caret_layout(d: &Dict, rect: [f64; 4]) -> ([f64; 4], Option<(f64, f64, f64)>) {
+    let rd = nums(d, b"RD").filter(|r| r.len() == 4 && r.iter().all(|x| x.is_finite() && *x >= 0.0));
+    let mut caret = match rd {
+        Some(rd) => [rect[0] + rd[0], rect[1] + rd[3], rect[2] - rd[2], rect[3] - rd[1]],
+        None => rect,
+    };
+    if !(caret[2] > caret[0] && caret[3] > caret[1]) {
+        caret = rect;
+    }
+    if d.name(b"Sy") != Some(b"P") {
+        return (caret, None);
+    }
+    let size = (caret[3] - caret[1]) * 0.6;
+    let (gap, glyph) = (size * 0.1, text_width("\u{b6}", size));
+    let need = gap + glyph;
+    let room = rect[2] - caret[2];
+    if room < need {
+        caret[2] -= (need - room).min((caret[2] - caret[0]) * 0.5);
+    }
+    let room = rect[2] - caret[2];
+    let scale = if need > room { room / need } else { 1.0 };
+    let size = size * scale;
+    if !(size.is_finite() && size > 0.0) {
+        return (caret, None);
+    }
+    // The pilcrow descends about a sixth of the size below its baseline.
+    (caret, Some((caret[2] + gap * scale, caret[1] + size * 0.18, size)))
 }
 
 /// Draw the normal appearance of an annotation, or `None` if this subtype/variant isn't supported.
@@ -315,6 +395,8 @@ pub fn build(d: &Dict) -> Option<Stream> {
     let w = border_width(d);
     let mut res = Dict::new();
     let mut c = String::new();
+    // Content after `c` that isn't UTF-8 (WinAnsi text).
+    let mut tail: Vec<u8> = Vec::new();
     let markup = matches!(subtype.as_slice(), b"Highlight" | b"Underline" | b"StrikeOut" | b"Squiggly");
     if let Some(gs) = ext_gstate(opacity, subtype == b"Highlight") {
         res.set(b"ExtGState".to_vec(), Object::Dict(gs));
@@ -439,12 +521,28 @@ pub fn build(d: &Dict) -> Option<Stream> {
                 return None;
             }
             let fill = interior_color(d, Some(col)).unwrap_or(col);
+            let layout = line_layout(d, [(l[0], l[1]), (l[2], l[3])], w);
+            let [p, q] = layout.line;
             c.push_str(&format!("{}{}{} w 1 J 1 j\n{}", rg_stroke(col), rg(fill), n(w), dash(d)));
-            c.push_str(&format!("{} {} m {} {} l S\n[] 0 d\n", n(l[0]), n(l[1]), n(l[2]), n(l[3])));
-            for (end, (tip, from)) in ends.iter().zip([((l[0], l[1]), (l[2], l[3])), ((l[2], l[3]), (l[0], l[1]))]) {
+            for [s, e] in layout.leaders.iter().chain(&layout.strokes).chain(&layout.tick) {
+                c.push_str(&format!("{} {} m {} {} l S\n", n(s.0), n(s.1), n(e.0), n(e.1)));
+            }
+            c.push_str("[] 0 d\n");
+            for (end, (tip, from)) in ends.iter().zip([(p, q), (q, p)]) {
                 if !line_end(&mut c, end, tip, from, w) {
                     return None;
                 }
+            }
+            if let Some((text, m)) = layout.caption {
+                // The caption is black, in the standard font the measurement label uses.
+                tail.extend(
+                    format!("q 0 g BT /Helv {} Tf {} {} {} {} {} {} Tm ", n(CAPTION_SIZE), n(m[0]), n(m[1]), n(m[2]), n(m[3]), n(m[4]), n(m[5]))
+                        .bytes(),
+                );
+                // WinAnsi bytes go into the stream as-is, not through UTF-8.
+                tail.extend(literal(&win_ansi(&text)));
+                tail.extend_from_slice(b" Tj ET Q\n");
+                res.set(b"Font".to_vec(), helvetica_resource());
             }
         }
         b"Polygon" | b"PolyLine" => {
@@ -506,7 +604,8 @@ pub fn build(d: &Dict) -> Option<Stream> {
         b"Caret" => {
             // A filled caret: two curved flanks meeting at the top centre.
             let col = stroke.unwrap_or([0.0, 0.47, 0.84]);
-            let [x0, y0, x1, y1] = rect;
+            let (caret, pilcrow) = caret_layout(d, rect);
+            let [x0, y0, x1, y1] = caret;
             let (cx, h) = ((x0 + x1) / 2.0, y1 - y0);
             c.push_str(&format!(
                 "{}{} {} m {} {} {} {} {} {} c {} {} {} {} {} {} c h f\n",
@@ -526,11 +625,22 @@ pub fn build(d: &Dict) -> Option<Stream> {
                 n(x1),
                 n(y0)
             ));
+            if let Some((x, y, size)) = pilcrow {
+                // `/Sy /P`: a new paragraph symbol beside the caret (Table 183), in its colour.
+                // 0xB6 is the pilcrow in WinAnsiEncoding.
+                let mut out = c.into_bytes();
+                out.extend(format!("BT /Helv {} Tf {} {} Td (", n(size), n(x), n(y)).bytes());
+                out.push(0xB6);
+                out.extend_from_slice(b") Tj ET\n");
+                res.set(b"Font".to_vec(), helvetica_resource());
+                return Some(form(rect, &out, res));
+            }
         }
         b"Ink" => {
             let col = stroke?;
             let list = d.get(b"InkList")?.as_array()?;
-            c.push_str(&format!("{}{} w 1 J 1 j\n", rg_stroke(col), n(w)));
+            // `/BS` gives an ink stroke its width and dash pattern (Table 182).
+            c.push_str(&format!("{}{} w 1 J 1 j\n{}", rg_stroke(col), n(w), dash(d)));
             for s in list {
                 let pts: Vec<f64> = s.as_array()?.iter().map(|o| o.as_f64()).collect::<Option<_>>()?;
                 let pts: Vec<(f64, f64)> = pts.as_chunks::<2>().0.iter().map(|p| (p[0], p[1])).collect();
@@ -559,7 +669,7 @@ pub fn build(d: &Dict) -> Option<Stream> {
                         c.push_str("h\n");
                     }
                 }
-                c.push_str("f*\n");
+                c.push_str("f\n");
                 return Some(form(rect, c.as_bytes(), res));
             }
             // A custom stamp: its picture (an image, or a form mapped to /PCPictureSize) fills
@@ -593,7 +703,28 @@ pub fn build(d: &Dict) -> Option<Stream> {
             // Only PdfCraft's own Fill & Sign marks are drawn here.
             let name = d.name(b"Name")?;
             let col = stroke.unwrap_or([0.0; 3]);
-            let [x0, y0, x1, y1] = rect;
+            // A mark or stamp placed on a turned page is drawn upright in its displayed box, then
+            // mapped into `/Rect` the way the page maps display space into user space. Viewers
+            // fit that box to `/Rect`; the page rotation then shows it the right way up.
+            let turn = stamp_turn(d);
+            let draw = if turn == 0 {
+                rect
+            } else {
+                let (rw, rh) = (rect[2] - rect[0], rect[3] - rect[1]);
+                let (dw, dh) = if matches!(turn, 90 | 270) { (rh, rw) } else { (rw, rh) };
+                if dw < 1.0 || dh < 1.0 {
+                    return None;
+                }
+                [0.0, 0.0, dw, dh]
+            };
+            let turned = |mut stream: Stream| {
+                if turn != 0 {
+                    let m = pdfcraft_model::view_matrix_for(turn, rect);
+                    stream.dict.set(b"Matrix".to_vec(), Object::Array(m.iter().copied().map(Object::Real).collect()));
+                }
+                stream
+            };
+            let [x0, y0, x1, y1] = draw;
             let (w, h) = (x1 - x0, y1 - y0);
             let lw = w.min(h) * 0.12;
             match name {
@@ -643,27 +774,12 @@ pub fn build(d: &Dict) -> Option<Stream> {
                     }
                     let kind = crate::StampKind::from_name(other)?;
                     let by = d.get(b"PCByLine").and_then(|o| o.as_string()).map(PdfString::to_text);
-                    let turn = stamp_turn(d);
-                    let draw = if turn == 0 {
-                        rect
-                    } else {
-                        let (rw, rh) = (rect[2] - rect[0], rect[3] - rect[1]);
-                        let (dw, dh) = if matches!(turn, 90 | 270) { (rh, rw) } else { (rw, rh) };
-                        if dw < 1.0 || dh < 1.0 {
-                            return None;
-                        }
-                        [0.0, 0.0, dw, dh]
-                    };
-                    let mut stream = stamp(kind, draw, stroke.unwrap_or(kind.color()), by.as_deref(), opacity, res);
-                    if turn != 0 {
-                        // Upright in the stamp's displayed box, then mapped into `/Rect` the way
-                        // the page maps display space into user space. Viewers fit that box to
-                        // `/Rect`; the page rotation then shows the label the right way up.
-                        let m = pdfcraft_model::view_matrix_for(turn, rect);
-                        stream.dict.set(b"Matrix".to_vec(), Object::Array(m.iter().copied().map(Object::Real).collect()));
-                    }
-                    return Some(stream);
+                    let sign_here = kind.group() == crate::StampGroup::SignHere;
+                    return Some(turned(stamp(kind.label(), sign_here, draw, stroke.unwrap_or(kind.color()), by.as_deref(), opacity, res)));
                 }
+            }
+            if turn != 0 {
+                return Some(turned(form(draw, c.as_bytes(), res)));
             }
         }
         b"FreeText" => {
@@ -762,14 +878,7 @@ pub fn build(d: &Dict) -> Option<Stream> {
                 y -= size * 1.2;
             }
             out.extend_from_slice(b"ET\n");
-            let mut font = Dict::new();
-            font.set(b"Type".to_vec(), Object::name("Font"));
-            font.set(b"Subtype".to_vec(), Object::name("Type1"));
-            font.set(b"BaseFont".to_vec(), Object::name("Helvetica"));
-            font.set(b"Encoding".to_vec(), Object::name("WinAnsiEncoding"));
-            let mut fonts = Dict::new();
-            fonts.set(b"Helv".to_vec(), Object::Dict(font));
-            res.set(b"Font".to_vec(), Object::Dict(fonts));
+            res.set(b"Font".to_vec(), helvetica_resource());
             let mut stream = form(full, &out, res);
             if let Some(m) = matrix {
                 stream.dict.set(b"Matrix".to_vec(), Object::Array(m.iter().copied().map(Object::Real).collect()));
@@ -781,6 +890,7 @@ pub fn build(d: &Dict) -> Option<Stream> {
     // PdfCraft measurement captions are kept separate from the comment's free-form text.
     // A restyle regenerates the path and its value together.
     let mut out = c.into_bytes();
+    out.extend(tail);
     if let Some(value) = d.get(b"PCMeasureValue").and_then(Object::as_string) {
         let value = value.to_text();
         if value.chars().count() <= 256 && matches!(subtype.as_slice(), b"Line" | b"PolyLine" | b"Polygon") {
@@ -792,186 +902,8 @@ pub fn build(d: &Dict) -> Option<Stream> {
             // WinAnsi bytes (e.g. 0xB2 for "²") go into the stream as-is, not through UTF-8.
             out.extend(literal(&win_ansi(&value)));
             out.extend_from_slice(b" Tj ET\n");
-            let mut font = Dict::new();
-            font.set(b"Type".to_vec(), Object::name("Font"));
-            font.set(b"Subtype".to_vec(), Object::name("Type1"));
-            font.set(b"BaseFont".to_vec(), Object::name("Helvetica"));
-            font.set(b"Encoding".to_vec(), Object::name("WinAnsiEncoding"));
-            let mut fonts = Dict::new();
-            fonts.set(b"Helv".to_vec(), Object::Dict(font));
-            res.set(b"Font".to_vec(), Object::Dict(fonts));
+            res.set(b"Font".to_vec(), helvetica_resource());
         }
     }
     Some(form(rect, &out, res))
-}
-
-/// A rubber stamp: a rounded frame (a pointed tag for sign-here stamps) with the label in bold
-/// capitals, and the dynamic stamps' "By … at …" line.
-fn stamp(kind: crate::StampKind, rect: [f64; 4], col: Rgb, by: Option<&str>, opacity: f64, mut res: Dict) -> Stream {
-    let [x0, y0, x1, y1] = rect;
-    let h = y1 - y0;
-    let mut c = String::new();
-    if opacity < 1.0 {
-        c.push_str("/GS0 gs\n");
-    }
-    let lw = (h * 0.07).clamp(1.0, 3.0);
-    let inset = lw / 2.0 + 0.5;
-    if kind.group() == crate::StampGroup::SignHere {
-        // A tag pointing left, filled, with white text.
-        let tip = h * 0.45;
-        c.push_str(&format!(
-            "{}{}{} w 1 j\n{} {} m {} {} l {} {} l {} {} l {} {} l h B\n",
-            rg(col),
-            rg_stroke(col),
-            n(lw),
-            n(x0 + inset),
-            n(y0 + h / 2.0),
-            n(x0 + tip),
-            n(y1 - inset),
-            n(x1 - inset),
-            n(y1 - inset),
-            n(x1 - inset),
-            n(y0 + inset),
-            n(x0 + tip),
-            n(y0 + inset)
-        ));
-    } else {
-        // A rounded frame with a light tint.
-        let r = (h * 0.2).min(8.0);
-        let k = 0.552_284_75 * r;
-        let (a0, b0, a1, b1) = (x0 + inset, y0 + inset, x1 - inset, y1 - inset);
-        let tint = col.map(|v| 1.0 - (1.0 - v) * 0.12);
-        c.push_str(&format!(
-            "{}{}{} w\n{} {} m {} {} l {} {} {} {} {} {} c {} {} l {} {} {} {} {} {} c {} {} l {} {} {} {} {} {} c {} {} l {} {} {} {} {} {} c h B\n",
-            rg(tint),
-            rg_stroke(col),
-            n(lw),
-            n(a0 + r),
-            n(b0),
-            n(a1 - r),
-            n(b0),
-            n(a1 - r + k),
-            n(b0),
-            n(a1),
-            n(b0 + r - k),
-            n(a1),
-            n(b0 + r),
-            n(a1),
-            n(b1 - r),
-            n(a1),
-            n(b1 - r + k),
-            n(a1 - r + k),
-            n(b1),
-            n(a1 - r),
-            n(b1),
-            n(a0 + r),
-            n(b1),
-            n(a0 + r - k),
-            n(b1),
-            n(a0),
-            n(b1 - r + k),
-            n(a0),
-            n(b1 - r),
-            n(a0),
-            n(b0 + r),
-            n(a0),
-            n(b0 + r - k),
-            n(a0 + r - k),
-            n(b0),
-            n(a0 + r),
-            n(b0)
-        ));
-    }
-    let label = kind.label();
-    let (title_h, by_h) = if by.is_some() { (h * 0.5, h * 0.22) } else { (h * 0.52, 0.0) };
-    let text_area = if kind.group() == crate::StampGroup::SignHere { (x0 + h * 0.45, x1 - lw * 2.0) } else { (x0 + lw * 2.0, x1 - lw * 2.0) };
-    let mut size = title_h;
-    let tw = text_width(label, size) * 1.12;
-    if tw > text_area.1 - text_area.0 - 4.0 {
-        size *= (text_area.1 - text_area.0 - 4.0) / tw;
-    }
-    let tw = text_width(label, size) * 1.12;
-    let text_col = if kind.group() == crate::StampGroup::SignHere { [1.0, 1.0, 1.0] } else { col };
-    let ty = if by.is_some() { y0 + h * 0.48 } else { y0 + (h - size * 0.72) / 2.0 };
-    let mut out = c.into_bytes();
-    out.extend(
-        format!("BT\n{}/HelvB {} Tf\n1 0 0 1 {} {} Tm ", rg(text_col), n(size), n(text_area.0 + (text_area.1 - text_area.0 - tw) / 2.0), n(ty))
-            .bytes(),
-    );
-    out.extend(literal(&win_ansi(label)));
-    out.extend_from_slice(b" Tj\n");
-    if let Some(b) = by {
-        let mut s = by_h;
-        let bw = text_width(b, s);
-        if bw > text_area.1 - text_area.0 - 4.0 {
-            s *= (text_area.1 - text_area.0 - 4.0) / bw;
-        }
-        let bw = text_width(b, s);
-        out.extend(
-            format!("/Helv {} Tf\n1 0 0 1 {} {} Tm ", n(s), n(text_area.0 + (text_area.1 - text_area.0 - bw) / 2.0), n(y0 + h * 0.18)).bytes(),
-        );
-        out.extend(literal(&win_ansi(b)));
-        out.extend_from_slice(b" Tj\n");
-    }
-    out.extend_from_slice(b"ET\n");
-    let font = |base: &str| {
-        let mut f = Dict::new();
-        f.set(b"Type".to_vec(), Object::name("Font"));
-        f.set(b"Subtype".to_vec(), Object::name("Type1"));
-        f.set(b"BaseFont".to_vec(), Object::name(base));
-        f.set(b"Encoding".to_vec(), Object::name("WinAnsiEncoding"));
-        Object::Dict(f)
-    };
-    let mut fonts = Dict::new();
-    fonts.set(b"HelvB".to_vec(), font("Helvetica-Bold"));
-    fonts.set(b"Helv".to_vec(), font("Helvetica"));
-    res.set(b"Font".to_vec(), Object::Dict(fonts));
-    form(rect, &out, res)
-}
-
-/// An ellipse inscribed in a rectangle, as four Bézier arcs.
-fn ellipse(x0: f64, y0: f64, x1: f64, y1: f64) -> String {
-    let k = 0.552_284_75;
-    let (cx, cy, rx, ry) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0, (x1 - x0) / 2.0, (y1 - y0) / 2.0);
-    let (ox, oy) = (rx * k, ry * k);
-    let mut s = format!("{} {} m\n", n(cx + rx), n(cy));
-    for [a, b, c, d, e, f] in [
-        [cx + rx, cy + oy, cx + ox, cy + ry, cx, cy + ry],
-        [cx - ox, cy + ry, cx - rx, cy + oy, cx - rx, cy],
-        [cx - rx, cy - oy, cx - ox, cy - ry, cx, cy - ry],
-        [cx + ox, cy - ry, cx + rx, cy - oy, cx + rx, cy],
-    ] {
-        s.push_str(&format!("{} {} {} {} {} {} c\n", n(a), n(b), n(c), n(d), n(e), n(f)));
-    }
-    s.push_str("h\n");
-    s
-}
-
-/// PdfCraft's note icons, drawn in a 20 × 20 box: a speech bubble for `/Comment`, a page
-/// with a folded corner for everything else, both filled with the note colour.
-/// File attachment icons in a 20 × 20 box: PdfCraft's own drawings.
-fn attach_icon(name: &str, col: Rgb) -> String {
-    let mut s = format!("{}{}1.2 w 1 j 1 J\n", rg(col), rg_stroke(col));
-    match name {
-        "Paperclip" => s.push_str("8 4 m 8 15 l 8 18 13 18 13 15 c 13 6 l 13 3 10 3 10 6 c 10 14 l S\n"),
-        "Graph" => s.push_str("3 3 m 3 17 l 3 3 m 17 3 l S\n5 3 3 6 re 9 3 3 10 re 13 3 3 13 re f\n"),
-        "Tag" => s.push_str("3 10 m 8 15 l 17 15 l 17 5 l 8 5 l h S\n7.3 10 m 7.3 10.7 6.7 11.3 6 11.3 c 5.3 11.3 4.7 10.7 4.7 10 c 4.7 9.3 5.3 8.7 6 8.7 c 6.7 8.7 7.3 9.3 7.3 10 c f\n"),
-        _ => {
-            // Push pin: a round head on a short needle.
-            s.push_str("10 2 m 10 9 l S\n6 9 m 14 9 l 14 11 l 12 12 l 12 16 l 13.5 17 l 13.5 18.5 l 6.5 18.5 l 6.5 17 l 8 16 l 8 12 l 6 11 l h f\n");
-        }
-    }
-    s
-}
-
-fn note_icon(name: &str, col: Rgb) -> String {
-    let mut s = format!("{}0.25 0.25 0.25 RG 0.8 w 1 j 1 J\n", rg(col));
-    if name == "Comment" {
-        s.push_str("3 18.5 m 17 18.5 l 18.5 18.5 18.5 17 18.5 17 c 18.5 8 l 18.5 6.5 17 6.5 17 6.5 c 9.5 6.5 l 5 2 l 5.5 6.5 l 3 6.5 l 1.5 6.5 1.5 8 1.5 8 c 1.5 17 l 1.5 18.5 3 18.5 3 18.5 c h B\n");
-        s.push_str("4.5 15 m 15.5 15 l 4.5 12.5 m 15.5 12.5 l 4.5 10 m 11.5 10 l S\n");
-    } else {
-        s.push_str("3 19 m 13 19 l 17 15 l 17 1 l 3 1 l h B\n13 19 m 13 15 l 17 15 l S\n");
-        s.push_str("5.5 12 m 14.5 12 l 5.5 9 m 14.5 9 l 5.5 6 m 11.5 6 l S\n");
-    }
-    s
 }
